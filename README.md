@@ -7,10 +7,10 @@
 ## Window mode
 
 ```sh
-go run go.creack.net/corewar@latest
+go run go.creack.net/corewar/vm@latest
 
 # Or simply
-go run .
+go run ./vm
 ```
 
 ## WASM
@@ -19,7 +19,7 @@ go run .
 
 ```sh
 # Without Docker
-env -i HOME=${HOME} PATH=${PATH} go tool wasmserve .
+env -i HOME=${HOME} PATH=${PATH} go tool wasmserve ./vm
 
 # With Docker
 make
@@ -37,7 +37,7 @@ cd corewar
 Run:
 
 ```sh
-env -i HOME=${HOME} PATH=${PATH} go tool wasmserve .
+env -i HOME=${HOME} PATH=${PATH} go tool wasmserve ./vm
 ```
 
 For development, `wasmer` exposes an endpoint to do live reload.
