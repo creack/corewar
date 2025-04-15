@@ -1,561 +1,216 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
+	"flag"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"strings"
-	"unicode/utf8"
+	"unsafe"
+
+	parse "go.creack.net/corewar/asm/parser"
+	"go.creack.net/corewar/op"
 )
 
-// op_t    op_tab[]=
-// {
-//   {"live",1,{T_DIR},1,10,"alive"},
-//   {"ld",2,{T_DIR|T_IND,T_REG},2,5,"load"},
-//   {"st",2,{T_REG,T_IND|T_REG},3,5,"store"},
-//   {"add",3,{T_REG,T_REG,T_REG},4,10,"addition"},
-//   {"sub",3,{T_REG,T_REG,T_REG},5,10,"soustraction"},
-//   {"and",3,{T_REG|T_DIR|T_IND,T_REG|T_IND|T_DIR,T_REG},6,6,"et (and  r1,r2,r3   r1&r2 -> r3"},
-//   {"or",3,{T_REG|T_IND|T_DIR,T_REG|T_IND|T_DIR,T_REG},7,6,"ou  (or   r1,r2,r3   r1|r2 -> r3"},
-//   {"xor",3,{T_REG|T_IND|T_DIR,T_REG|T_IND|T_DIR,T_REG},8,6,"ou (xor  r1,r2,r3   r1^r2 -> r3"},
-//   {"zjmp",1,{T_DIR},9,20,"jump if zero"},
-//   {"ldi",3,{T_REG|T_DIR|T_IND,T_DIR|T_REG,T_REG},10,25,"load index"},
-//   {"sti",3,{T_REG,T_REG|T_DIR|T_IND,T_DIR|T_REG},11,25,"store index"},
-//   {"fork",1,{T_DIR},12,800,"fork"},
-//   {"lld",2,{T_DIR|T_IND,T_REG},13,10,"long load"},
-//   {"lldi",3,{T_REG|T_DIR|T_IND,T_DIR|T_REG,T_REG},14,50,"long load index"},
-//   {"lfork",1,{T_DIR},15,1000,"long fork"},
-//   {"aff",1,{T_REG},16,2,"aff"},
-//   {0,0,0,0,0}
-// };
-
+// TODO: Investigate why the lexer yields 2 EOF at the end.
 const sample = `
+.name "zork"
+.comment "just a basic living prog"
 
- .name "zork"
-		.comment "just a basic living prog"
-l2	 : sti r1,%:live,%1
-and r1,%0,r1
-live: live %1
-zjmp %:live
+live:
+	sti	r1, %:live, %1 ; foo
+	ldi r2,r3,r4
+`
 
-# Executable compile (after header):
-#
-# 0x0b,0x68,0x01,0x00,0x0f,0x00,0x01
-# 0x06,0x64,0x01,0x00,0x00,0x00,0x00,0x01
-# 0x01,0x00,0x00,0x00,0x01
-# 0x09,0xff,0xfb
+// `
+// bite:	sti     r1,%:copie,%2   ; Pour le ld a l'entree
+//         ldi     %:copie,%3,r2   ; met le ld a l'entree
+//         sti     r2,%:entree,%-4
 
+// copie:
+// 	and	r1, %0, r1
 
+// live:
+// 	live	%1
+// entree:
+// 	zjmp	%:live
 
-	 `
+// ;# Executable compile (after header):
+// ;#
+// ;# 0x0b,0x68,0x01,0x00,0x0f,0x00,0x01
+// ;# 0x06,0x64,0x01,0x00,0x00,0x00,0x00,0x01
+// ;# 0x01,0x00,0x00,0x00,0x01
+// ;# 0x09,0xff,0xfb
 
-const (
-	TokenRoot = iota
-	TokenHeaderName
-	TokenString
-)
+// `
 
-const eof = -1
-
-type itemType int
-
-const (
-	itemError itemType = iota // Error occurred; value is text of (a single) error.
-	itemNewline
-	itemIdentifier
-	itemComment
-	itemRawString // Raw string, including quotes.
-	itemColumn
-	itemComa
-	itemPercent
-	itemEOF // End of the input.
-
-	// Keywords appear after all the rest.
-	itemKeyword // Used only to delimit the keywords.
-	itemDirective
-)
-
-type item struct {
-	typ  itemType // The type of this item.
-	pos  Pos      // The start position, in bytes, of this item in the input string.
-	val  string   // The value of this item.
-	line int      // The line number at the start of this item.
-}
-
-func (i item) String() string {
-	switch {
-	case i.typ == itemEOF:
-		return "EOF"
-	case i.typ == itemError:
-		return i.val
-	case i.typ > itemKeyword:
-		return fmt.Sprintf("<%s>", i.val)
-	case len(i.val) > 10:
-		return fmt.Sprintf("%.10q...", i.val)
+func encodeProgram(p *parse.Parser, program []byte, labels map[string]int) (int, map[string]int, error) {
+	// If we have labels, it means we already encoded once and have the labels index.
+	// Error out if we encounter a label that we don't know
+	hasLabelIndex := labels != nil
+	if !hasLabelIndex {
+		labels = map[string]int{}
 	}
-	return fmt.Sprintf("%q", i.val)
-}
 
-type Pos int
+	// Keep track whether or not we have missing labels
+	// so we can avoid re-encoding if not necessary.
+	hasMissingLabels := false
 
-// lexer hols the state of the scanner.
-// lexer holds the state of the scanner.
-type lexer struct {
-	name      string // The name of the input; used only for error reports.
-	input     string // The string being scanned.
-	pos       Pos    // Current position in the input.
-	start     Pos    // Start position of this item.
-	atEOF     bool   // We have hit the end of input and returned eof.
-	line      int    // 1+number of newlines seen.
-	startLine int    // Start line of this item.
-	item      item   // Item to return to parser.
-	options   lexOptions
-}
+	idx := 0
+	for _, ins := range p.Instructions {
+		// Has labels are indexed from the instruction start
+		// keep track of it.
+		idxInstruction := idx
 
-// lexOptions control behavior of the lexer. All default to false.
-type lexOptions struct {
-	emitComment bool // emit itemComment tokens.
-	breakOK     bool // break keyword allowed
-	continueOK  bool // continue keyword allowed
-}
-
-// errorf returns an error token and terminates the scan by passing
-// back a nil pointer that will be the next state, terminating l.nextItem.
-func (l *lexer) errorf(format string, args ...any) stateFn {
-	l.item = item{itemError, l.start, fmt.Sprintf(format, args...), l.startLine}
-	l.start = 0
-	l.pos = 0
-	l.input = l.input[:0]
-	return nil
-}
-
-// next returns the next rune in the input.
-func (l *lexer) next() rune {
-	if int(l.pos) >= len(l.input) {
-		l.atEOF = true
-		return eof
-	}
-	r, w := utf8.DecodeRuneInString(l.input[l.pos:])
-	l.pos += Pos(w)
-	if r == '\n' {
-		l.line++
-	}
-	return r
-}
-
-// peek returns but does not consume the next rune in the input.
-func (l *lexer) peek() rune {
-	r := l.next()
-	l.backup()
-	return r
-}
-
-// backup steps back one rune.
-func (l *lexer) backup() {
-	if !l.atEOF && l.pos > 0 {
-		r, w := utf8.DecodeLastRuneInString(l.input[:l.pos])
-		l.pos -= Pos(w)
-		// Correct newline count.
-		if r == '\n' {
-			l.line--
+		// If the instruction has a label, we need to store
+		// it in the labels map for future reference.
+		for _, label := range ins.Labels {
+			labels[label] = idx
 		}
-	}
-}
-
-// thisItem returns the item at the current input point with the specified type
-// and advances the input.
-func (l *lexer) thisItem(t itemType) item {
-	i := item{t, l.start, l.input[l.start:l.pos], l.startLine}
-	l.start = l.pos
-	l.startLine = l.line
-	return i
-}
-
-// emit passes the trailing text as an item back to the parser.
-func (l *lexer) emit(t itemType) stateFn {
-	return l.emitItem(l.thisItem(t))
-}
-
-// emitItem passes the specified item to the parser.
-func (l *lexer) emitItem(i item) stateFn {
-	l.item = i
-	return nil
-}
-
-// ignore skips over the pending input before this point.
-// It tracks newlines in the ignored text, so use it only
-// for text that is skipped without calling l.next.
-func (l *lexer) ignore() {
-	l.line += strings.Count(l.input[l.start:l.pos], "\n")
-	l.start = l.pos
-	l.startLine = l.line
-}
-
-// accept consumes the next rune if it's from the valid set.
-func (l *lexer) accept(valid string) bool {
-	if strings.ContainsRune(valid, l.next()) {
-		return true
-	}
-	l.backup()
-	return false
-}
-
-// acceptRun consumes a run of runes from the valid set.
-func (l *lexer) acceptRun(valid string) {
-	for strings.ContainsRune(valid, l.next()) {
-	}
-	l.backup()
-}
-
-// lexText scans until an opening action delimiter, "{{".
-func lexText(l *lexer) stateFn {
-	l.acceptRun(" \t") // Consume leading whitespace.
-	if l.atEOF {
-		return l.emit(itemEOF)
-	}
-	l.ignore() // ignore leading whitespace.
-	switch r := l.peek(); r {
-	case '\n', ';':
-		l.acceptRun(" \t\n;")
-		l.ignore()
-		if l.atEOF {
-			return l.emit(itemEOF)
+		// Store the opcode and advance.
+		program[idx] = ins.OpCode.Code
+		idx++
+		// If the instruction requires an encoding byte,
+		// store it and advance.
+		if ins.OpCode.EncodingByte {
+			program[idx] = ins.ParamsEncoding()
+			idx++
 		}
-		return l.emit(itemNewline)
-	case '.':
-		return lexDirective
-	case '#':
-		return lexComment
-	case '"':
-		return lexString
-	case ':':
-		l.pos++
-		return l.emit(itemColumn)
-	case ',':
-		l.pos++
-		return l.emit(itemComa)
-	case '%':
-		l.pos++
-		return l.emit(itemPercent)
-	default:
-		// NOTE: All instruction chars are within the label set.
-		if strings.ContainsRune(LabelChars, r) {
-			return lexIdentifier
-		}
-		return l.errorf("unexpected character %c", r)
-	}
-}
-
-func lexIdentifier(l *lexer) stateFn {
-	l.acceptRun(LabelChars) // NOTE: All instruction chars are within the label set.
-	if l.atEOF {
-		return l.emit(itemEOF)
-	}
-	return l.emit(itemIdentifier)
-}
-
-func lexComment(l *lexer) stateFn {
-	for {
-		r := l.next()
-		if r == eof || r == '\n' {
-			break
-		}
-	}
-	i := l.thisItem(itemComment)
-	i.val = strings.TrimSpace(i.val)
-	return l.emitItem(i)
-}
-
-func lexString(l *lexer) stateFn {
-	l.pos++
-	for {
-		r := l.next()
-		if r == eof || r == '\n' {
-			return l.errorf("missing closing quote")
-		}
-		if r == '"' {
-			break
-		}
-		if r == '\\' {
-			l.next()
-		}
-	}
-	return l.emit(itemRawString)
-}
-
-func lexDirective(l *lexer) stateFn {
-	fmt.Printf("lexDirective: %q (%d:%d)\n", l.input[l.start:l.pos+5], l.start, l.pos)
-	nextSpace := strings.IndexAny(l.input[l.start:], " \t\n")
-	if nextSpace == -1 {
-		return l.errorf("missing space after directive")
-	}
-	l.pos += Pos(nextSpace)
-	i := l.thisItem(itemDirective)
-	if i.val == "." {
-		return l.errorf("missing directive name")
-	}
-	return l.emitItem(i)
-}
-
-type stateFn func(*lexer) stateFn
-
-// nextItem returns the next item from the input.
-// Called by the parser, not in the lexing goroutine.
-func (l *lexer) nextItem() item {
-	l.item = item{itemEOF, l.pos, "EOF", l.startLine}
-	state := lexText
-	for {
-		state = state(l)
-		if state == nil {
-			return l.item
-		}
-	}
-}
-
-// lex creates a new scanner for the input string.
-func NewLexer(name, input string) *lexer {
-	return &lexer{
-		name:      name,
-		input:     input,
-		line:      1,
-		startLine: 1,
-	}
-}
-
-type Parameter struct {
-	Typ   InstructionType
-	Value string
-}
-
-func (p Parameter) String() string {
-	switch p.Typ {
-	case TReg:
-		return fmt.Sprintf("r%s", p.Value)
-	case TInd:
-		return fmt.Sprintf("%s", p.Value)
-	case TDir:
-		return fmt.Sprintf("%%%s", p.Value)
-	default:
-		return fmt.Sprintf("unknown param type %d", p.Typ)
-	}
-}
-
-type Instruction struct {
-	InstructionDef
-	Params []Parameter
-	Label  string
-}
-
-func (ins Instruction) String() string {
-	out := ""
-	if ins.Label != "" {
-		out = "[" + ins.Label + "] "
-	}
-	out += ins.InstructionDef.Name
-	paramStrs := make([]string, 0, len(ins.Params))
-	for _, param := range ins.Params {
-		paramStrs = append(paramStrs, param.String())
-	}
-	out += " - " + strings.Join(paramStrs, ", ")
-	return out
-}
-
-// Parser structure
-type Parser struct {
-	lexer     *lexer
-	currToken item
-	peekToken item
-
-	directives     map[string]string
-	instructions   []*Instruction
-	curInstruction *Instruction
-}
-
-// NewParser creates a new parser
-func NewParser(name, input string) *Parser {
-	p := &Parser{
-		lexer:      NewLexer(name, input),
-		directives: map[string]string{},
-	}
-	p.nextToken()
-	p.nextToken()
-	return p
-}
-
-func (p *Parser) parseDirective() error {
-	directiveName := strings.TrimPrefix(p.lexer.item.val, ".")
-	p.nextToken()
-	item := p.currToken
-	if item.typ != itemRawString {
-		return fmt.Errorf("expected string, got %s", item)
-	}
-	directiveValue := strings.Trim(item.val, "\"")
-	if directiveValue == "" {
-		return fmt.Errorf("missing directive %q value", directiveName)
-	}
-	if _, ok := p.directives[directiveName]; ok {
-		return fmt.Errorf("duplicate directive %q", directiveName)
-	}
-	p.directives[directiveName] = directiveValue
-	return nil
-}
-
-func (p *Parser) parseIdentifier() error {
-	if p.curInstruction == nil {
-		ins := Instruction{}
-		p.instructions = append(p.instructions, &ins)
-		p.curInstruction = &ins
-	}
-
-	// Optional label in front or alone on the line.
-	if p.peekToken.typ == itemColumn {
-		if p.curInstruction.Label != "" {
-			return fmt.Errorf("too many label %s", p.currToken)
-		}
-		p.curInstruction.Label = p.currToken.val
-		p.nextToken()
-		return nil
-	}
-
-	// If we don't have the instruction name yet, we need it.
-	if p.curInstruction.InstructionDef.Name == "" {
-		if p.currToken.typ != itemIdentifier {
-			return fmt.Errorf("expected instruction name, got %s", p.currToken)
-		}
-		for _, ins := range InstructionTable {
-			if ins.Name == p.currToken.val {
-				p.curInstruction.InstructionDef = ins
-				break
-			}
-		}
-		if p.curInstruction.InstructionDef.Name == "" {
-			return fmt.Errorf("unknown instruction %q", p.currToken.val)
-		}
-	}
-	return p.parseInstructionParameters()
-}
-
-func (p *Parser) parseInstructionParameters() error {
-	var param Parameter
-	for {
-		p.nextToken()
-		item := p.currToken
-		if item.typ == itemEOF || item.typ == itemNewline {
-			if param != (Parameter{}) {
-				p.curInstruction.Params = append(p.curInstruction.Params, param)
-			}
-			p.curInstruction = nil
-			break
-		}
-
-		// If we have an identifier, it can be a register if it starts with 'r'
-		// or an indirect if it is a number.
-		if item.typ == itemIdentifier {
-			if strings.HasPrefix(item.val, "r") {
-				param.Typ = TReg
-				param.Value = item.val[1:]
-			} else {
-				// TODO: Add stronger validation, make sure it is a number.
-				param.Typ = TInd
-				param.Value = item.val
-			}
-			continue
-		}
-		// Indirect label.
-		if item.typ == itemColumn {
-			param.Typ = TInd
-			p.nextToken()
-			if p.currToken.typ != itemIdentifier {
-				return fmt.Errorf("expected identifier for indirect label, got %s", p.currToken)
-			}
-			param.Value = p.currToken.val
-			continue
-		}
-
-		// Direct value.
-		if item.typ == itemPercent {
-			param.Typ = TDir
-			p.nextToken()
-			if p.currToken.typ != itemIdentifier && p.currToken.typ != itemColumn {
-				return fmt.Errorf("expected identifier or column for direct value, got %s", p.currToken)
-			}
-			if p.currToken.typ == itemColumn {
-				p.nextToken()
-				if p.currToken.typ != itemIdentifier {
-					return fmt.Errorf("expected identifier for direct label, got %s", p.currToken)
+		// Encore each param.
+		for _, param := range ins.Params {
+			// Handle case for label references.
+			if strings.HasPrefix(param.Value, string(op.LabelChar)) {
+				// If we already know the label, we can
+				// replace the it with the offset.
+				// Otherwise, keep going, it will be known the second time.
+				if _, ok := labels[param.Value[1:]]; ok {
+					param.Value = strconv.Itoa(labels[param.Value[1:]] - idxInstruction)
+				} else if !hasLabelIndex {
+					hasMissingLabels = true
+				} else {
+					// If we don't know the label while having
+					// the labels index, error out.
+					return 0, nil, fmt.Errorf("unknown label %q", param.Value)
 				}
-				param.Value = ":" + p.currToken.val
-			} else if p.currToken.typ == itemIdentifier {
-				param.Value = p.currToken.val
-			} else {
-				return fmt.Errorf("expected identifier for direct value, got %s", p.currToken)
 			}
-			continue
-		}
-
-		if p.currToken.typ == itemComa {
-			p.curInstruction.Params = append(p.curInstruction.Params, param)
-			param = Parameter{}
-			continue
-		}
-
-		return fmt.Errorf("unexpected token %s", p.currToken)
-	}
-	return nil
-}
-
-// nextToken advances to the next token
-func (p *Parser) nextToken() {
-	p.currToken = p.peekToken
-	p.peekToken = p.lexer.nextItem()
-}
-
-func (p *Parser) Parse() error {
-	for {
-		p.nextToken()
-		item := p.currToken
-		if item.typ == itemEOF {
-			break
-		}
-		if item.typ == itemError {
-			return fmt.Errorf("[%d:%d]: %s", item.line, item.pos, item.val)
-		}
-
-		var err error
-		switch item.typ {
-		case itemNewline:
-			continue
-		case itemDirective:
-			err = p.parseDirective()
-		case itemComment:
-			continue
-		case itemIdentifier:
-			err = p.parseIdentifier()
-		default:
-			return fmt.Errorf("unexpected item %s", item)
-		}
-		if err != nil {
-			return fmt.Errorf("error parsing item: %s", err)
+			// Encode the paramter and advance the index.
+			n, err := param.Encode(program[idx:], ins.OpCode.AddressMode)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to encode parameter %s: %w", param, err)
+			}
+			idx += n
 		}
 	}
-
-	return nil
+	// If we don't have any missing labels, we don't need to re-encode,
+	// return nil label map to indicate that.
+	if !hasMissingLabels {
+		return idx, nil, nil
+	}
+	return idx, labels, nil
 }
 
-func test0() error {
-	p := NewParser("example", sample)
+func test0(input, output string) error {
+	data, err := os.ReadFile(input)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+	if output == "" {
+		output = strings.ReplaceAll(input, ".s", ".cor")
+	}
+	//data = []byte(sample)
+	p := parse.NewParser(input, string(data))
 	if err := p.Parse(); err != nil {
 		return fmt.Errorf("failed to parse: %w", err)
 	}
-	fmt.Printf("Parsed successfully: %v\n", p.directives)
-	log.Printf("instr: %d\n", len(p.instructions))
-	for i, ins := range p.instructions {
-		log.Printf("instruction %d: %s\n", i, ins)
+	fmt.Printf("Parsed successfully: %v\n", p.Directives)
+	log.Printf("instr: %d\n", len(p.Instructions))
+
+	program := make([]byte, op.MemSize)
+	progSize, labels, err := encodeProgram(p, program, nil)
+	if err != nil {
+		return fmt.Errorf("failed to encode program: %w", err)
 	}
+	if labels != nil {
+		log.Println("reenc")
+		if _, _, err := encodeProgram(p, program, labels); err != nil {
+			return fmt.Errorf("failed to encode program: %w", err)
+		}
+	}
+
+	for _, elem := range p.Instructions {
+		log.Println(elem)
+	}
+
+	header := op.ChampionHeader{
+		Magic:    op.CorewarExecMagic,
+		ProgSize: uint32(progSize),
+	}
+	copy(header.ProgName[:], p.Directives["name"])
+	copy(header.Comment[:], p.Directives["comment"])
+
+	buf := bytes.NewBuffer(nil)
+
+	// Write the magic number.
+	tmp := make([]byte, 4)
+	binary.BigEndian.PutUint32(tmp, header.Magic)
+	buf.Write(tmp)
+
+	// Make sure the field are aligned in memory.
+	alignOf := int(unsafe.Alignof(header))
+	// Write the program name.
+	buf.Write(header.ProgName[:])
+	// Pad alginment.
+	if m := len(header.ProgName) % alignOf; m != 0 {
+		buf.Write(make([]byte, alignOf-m))
+	}
+
+	// Write the program size.
+	binary.BigEndian.PutUint32(tmp, header.ProgSize)
+	buf.Write(tmp)
+
+	// Write the program comments.
+	buf.Write(header.Comment[:])
+	// Pad alginment.
+	if m := len(header.Comment) % alignOf; m != 0 {
+		buf.Write(make([]byte, alignOf-m))
+	}
+
+	// Write the main program code.
+	buf.Write(program[:progSize])
+
+	if err := os.WriteFile(output, buf.Bytes(), 0644); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
 	return nil
 }
 
+// TODO:
+// - Support Hex/Octal/Binary for numbers with 0x 0o 0b prefixes.
+// - Support arithmetic expressions for numbers/labels.
+//   - Death.s
+//   - Backward.s
+//
+// - Find out and support .extend and .code
+//   - .code takes hex bytes as input, not a string
+//
+// - Try to decompile Torpille.cor to see where t2: is supposed to be.
+//
+// - Support indirect label refs.
 func main() {
-	if err := test0(); err != nil {
+	log.SetFlags(0)
+	output := flag.String("o", "", "output file, default to <input>.cor")
+	flag.Parse()
+	input := flag.Arg(0)
+	if input == "" {
+		fmt.Fprintf(os.Stderr, "usage: %s <input> [options]\n", os.Args[0])
+		flag.PrintDefaults()
+		return
+	}
+	if err := test0(input, *output); err != nil {
 		log.Fatalf("fail: %s.", err)
 	}
 }
