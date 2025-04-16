@@ -89,10 +89,6 @@ func (p *Parser) parseLabel() error {
 		}
 	}
 	p.Nodes = append(p.Nodes, &Label{Name: p.currToken.val})
-
-	// If we are here, we already know the next token is `:`, skip it.
-	//p.nextToken()
-	//log.Printf("parser -1: %v -- %v\n", p.currToken, p.peekToken)
 	return nil
 }
 
@@ -147,20 +143,27 @@ func (p *Parser) parseInstructionParameters() error {
 				param.Typ = op.TInd
 				param.Value = p.currToken.val
 			} else { // If we have a type, it means we are dealing with an arithmetic operation.
-				param.Modifiers = append(param.Modifiers, p.currToken.val)
+				param.Modifiers = append(param.Modifiers, modifier{raw: p.currToken.val})
 			}
 			continue
 		}
 
 		// Indirect label.
 		if p.currToken.typ == itemLabelRef {
-			param.Typ = op.TInd
-			param.Value = string(op.LabelChar) + p.currToken.val
+			if param.Typ == 0 {
+				param.Typ = op.TInd
+				param.Value = string(op.LabelChar) + p.currToken.val
+			} else {
+				param.Modifiers = append(param.Modifiers, modifier{raw: string(op.LabelChar) + p.currToken.val})
+			}
 			continue
 		}
 
 		// Direct value.
 		if p.currToken.typ == itemPercent {
+			if param.Typ != 0 {
+				return fmt.Errorf("unexpected %s in %q", p.currToken, p.curInstruction)
+			}
 			param.Typ = op.TDir
 			p.nextToken()
 

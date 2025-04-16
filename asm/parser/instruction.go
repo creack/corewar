@@ -107,6 +107,21 @@ func (ins Instruction) Encode(p *Program) error {
 				return fmt.Errorf("unknown label %q", param.Value)
 			}
 		}
+		for i, elem := range param.Modifiers {
+			if !strings.HasPrefix(elem.raw, string(op.LabelChar)) {
+				continue
+			}
+			if _, ok := p.labels[elem.raw[1:]]; ok {
+				param.Modifiers[i].resolved = strconv.Itoa(p.labels[elem.raw[1:]] - idxInstruction)
+			} else if !p.hasLabelIndex {
+				p.hasMissingLabels = true
+			} else {
+				// If we don't know the label while having
+				// the labels index, error out.
+				return fmt.Errorf("unknown label %q", elem)
+			}
+		}
+
 		// Encode the paramter and advance the index.
 		n, err := param.Encode(p.buf[p.idx:], ins.OpCode.ParamMode)
 		if err != nil {

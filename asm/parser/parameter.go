@@ -8,27 +8,38 @@ import (
 	"go.creack.net/corewar/op"
 )
 
+type modifier struct {
+	raw      string
+	resolved string
+	n        int64
+}
+
 // Parameter represents a parameter in an instruction.
 // Stored as raw string.
 type Parameter struct {
 	Typ       op.ParamType
 	Value     string
-	Modifiers []string // Modifiers for the parameter.
+	Modifiers []modifier // Modifiers for the parameter.
 }
 
 func (p Parameter) String() string {
+	var out string
 	switch p.Typ {
 	case op.TReg:
-		return string(op.RegisterChar) + p.Value
+		out = string(op.RegisterChar) + p.Value
 	case op.TInd:
-		return p.Value
+		out = p.Value
 	case op.TDir:
-		return string(op.DirectChar) + p.Value
+		out = string(op.DirectChar) + p.Value
 	case op.TLab:
-		return string(op.LabelChar) + p.Value
+		out = string(op.LabelChar) + p.Value
 	default:
 		return fmt.Sprintf("unknown param type %d", p.Typ)
 	}
+	for _, elem := range p.Modifiers {
+		out += elem.raw
+	}
+	return out
 }
 
 // NOTE: Some champions like 42.sh have numbers overflowing 32bits.
@@ -57,14 +68,22 @@ func (p Parameter) Encode(buf []byte, paramMode op.ParamMode) (int, error) {
 
 	// Apply modifiers if any.
 	for _, elem := range p.Modifiers {
-		fmt.Printf("-> Mod: %q\n", elem)
+		// If we still have a label reference unresolved,
+		// we can't calculate the value yet. Break away,
+		// next iteration will handle it.
+		if strings.HasPrefix(elem.raw, string(op.LabelChar)) && elem.resolved == "" {
+			break
+		}
 		var neg bool
-		switch elem {
+		switch elem.raw {
 		case "-":
 			neg = true
 		case "+":
 		default:
-			n1, err := parseNumber(elem)
+			if elem.resolved == "" { // If we deal with numbers directly, we don't have anything to resolve.
+				elem.resolved = elem.raw
+			}
+			n1, err := parseNumber(elem.resolved)
 			if err != nil {
 				return 0, fmt.Errorf("parse modifier %q: %w", elem, err)
 			}

@@ -140,7 +140,7 @@ func test0(input, output string) error {
 // start without label
 // label .code
 func main() {
-	n := 0xffc1
+	n := -10
 	log.Printf("%d -- %x\n", int16(n), uint16(n-400))
 	log.SetFlags(0)
 	output := flag.String("o", "", "output file, default to <input>.cor")

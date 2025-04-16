@@ -131,7 +131,7 @@ type OpCode struct {
 var OpCodeTable = []OpCode{
 	{"noop", nil, 0, 0, "noop", 0, false, false},
 	{"live", []ParamType{TDir}, 1, 10, "alive", 0, false, false},
-	{"ld", []ParamType{TDir | TInd, TReg}, 2, 5, "load", ParamModeDynamic, true, true},
+	{"ld", []ParamType{TDir | TInd, TReg}, 2, 5, "load", 0, true, true},
 	{"st", []ParamType{TReg, TInd | TReg}, 3, 5, "store", ParamModeIndex, true, false},
 	{"add", []ParamType{TReg, TReg, TReg}, 4, 10, "addition", ParamModeValue, true, true},
 	{"sub", []ParamType{TReg, TReg, TReg}, 5, 10, "subtraction", ParamModeValue, true, true},
