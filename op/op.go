@@ -29,6 +29,19 @@ const (
 	TLab                       // Label. Unused.
 )
 
+func (pt ParamType) Encoding() byte {
+	switch pt {
+	case TReg:
+		return 0b01
+	case TDir:
+		return 0b10
+	case TInd, TLab:
+		return 0b11
+	default:
+		return 0
+	}
+}
+
 func (pt ParamType) String() string {
 	var parts []string
 	if pt&TReg != 0 {
@@ -77,31 +90,29 @@ const (
 	SeparatorChar    = ','
 	DirectiveChar    = '.'
 	LabelChars       = "abcdefghijklmnopqrstuvwxyz_0123456789"
+	RawCodeChars     = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
 	NameCmdString    = ".name"
 	CommentCmdString = ".comment"
 )
 
-type AddressMode int
+type ParamMode int
 
 const (
-	_ AddressMode = iota
-	AddrModeRegister
-	AddrModeValue
-	AddrModeIndex
+	ParamModeDynamic ParamMode = iota // Encoded based on the opcode parameter type.
+	ParamModeValue                    // Always encoded as Direct value.
+	ParamModeIndex                    // Always encoded as Indirect (index) value.
 )
 
-func (am AddressMode) String() string {
+func (am ParamMode) String() string {
 	switch am {
-	case 0:
-		return "<none>"
-	case AddrModeRegister:
-		return "register"
-	case AddrModeValue:
+	case ParamModeDynamic:
+		return "dynamic"
+	case ParamModeValue:
 		return "value"
-	case AddrModeIndex:
+	case ParamModeIndex:
 		return "index"
 	default:
-		return "unknown address mode"
+		return "unknown param mode"
 	}
 }
 
@@ -112,29 +123,29 @@ type OpCode struct {
 	Code         byte
 	Cycles       int
 	Comment      string
-	AddressMode  AddressMode
+	ParamMode    ParamMode
 	EncodingByte bool
 	SetCarry     bool
 }
 
 var OpCodeTable = []OpCode{
 	{"noop", nil, 0, 0, "noop", 0, false, false},
-	{"live", []ParamType{TDir}, 1, 10, "alive", AddrModeValue, false, false},
-	{"ld", []ParamType{TDir | TInd, TReg}, 2, 5, "load", AddrModeValue, true, true},
-	{"st", []ParamType{TReg, TInd | TReg}, 3, 5, "store", AddrModeValue, true, false},
-	{"add", []ParamType{TReg, TReg, TReg}, 4, 10, "addition", AddrModeValue, true, true},
-	{"sub", []ParamType{TReg, TReg, TReg}, 5, 10, "subtraction", AddrModeValue, true, true},
-	{"and", []ParamType{TReg | TDir | TInd, TReg | TInd | TDir, TReg}, 6, 6, "and  r1,r2,r3   r1&r2 -> r3", AddrModeValue, true, true},
-	{"or", []ParamType{TReg | TInd | TDir, TReg | TInd | TDir, TReg}, 7, 6, "or   r1,r2,r3   r1|r2 -> r3", AddrModeValue, true, true},
-	{"xor", []ParamType{TReg | TInd | TDir, TReg | TInd | TDir, TReg}, 8, 6, "xor  r1,r2,r3   r1^r2 -> r3", AddrModeValue, true, true},
-	{"zjmp", []ParamType{TDir}, 9, 20, "jump if zero", AddrModeIndex, false, false},
-	{"ldi", []ParamType{TReg | TDir | TInd, TDir | TReg, TReg}, 10, 25, "load index", AddrModeIndex, true, true},
-	{"sti", []ParamType{TReg, TReg | TDir | TInd, TDir | TReg}, 11, 25, "store index", AddrModeIndex, true, false},
-	{"fork", []ParamType{TDir}, 12, 800, "fork", AddrModeIndex, false, false},
-	{"lld", []ParamType{TDir | TInd, TReg}, 13, 10, "long load", AddrModeValue, true, true},
-	{"lldi", []ParamType{TReg | TDir | TInd, TDir | TReg, TReg}, 14, 50, "long load index", AddrModeIndex, true, true},
-	{"lfork", []ParamType{TDir}, 15, 1000, "long fork", AddrModeIndex, false, true},
-	{"aff", []ParamType{TReg}, 16, 2, "display reg", AddrModeRegister, true, false},
+	{"live", []ParamType{TDir}, 1, 10, "alive", 0, false, false},
+	{"ld", []ParamType{TDir | TInd, TReg}, 2, 5, "load", ParamModeDynamic, true, true},
+	{"st", []ParamType{TReg, TInd | TReg}, 3, 5, "store", ParamModeIndex, true, false},
+	{"add", []ParamType{TReg, TReg, TReg}, 4, 10, "addition", ParamModeValue, true, true},
+	{"sub", []ParamType{TReg, TReg, TReg}, 5, 10, "subtraction", ParamModeValue, true, true},
+	{"and", []ParamType{TReg | TDir | TInd, TReg | TInd | TDir, TReg}, 6, 6, "and  r1,r2,r3   r1&r2 -> r3", ParamModeValue, true, true},
+	{"or", []ParamType{TReg | TInd | TDir, TReg | TInd | TDir, TReg}, 7, 6, "or   r1,r2,r3   r1|r2 -> r3", ParamModeValue, true, true},
+	{"xor", []ParamType{TReg | TInd | TDir, TReg | TInd | TDir, TReg}, 8, 6, "xor  r1,r2,r3   r1^r2 -> r3", ParamModeValue, true, true},
+	{"zjmp", []ParamType{TDir}, 9, 20, "jump if zero", ParamModeIndex, false, false},
+	{"ldi", []ParamType{TReg | TDir | TInd, TDir | TReg, TReg}, 10, 25, "load index", ParamModeIndex, true, true},
+	{"sti", []ParamType{TReg, TReg | TDir | TInd, TDir | TReg}, 11, 25, "store index", ParamModeIndex, true, false},
+	{"fork", []ParamType{TDir}, 12, 800, "fork", ParamModeIndex, false, false},
+	{"lld", []ParamType{TDir | TInd, TReg}, 13, 10, "long load", ParamModeValue, true, true},
+	{"lldi", []ParamType{TReg | TDir | TInd, TDir | TReg, TReg}, 14, 50, "long load index", ParamModeIndex, true, true},
+	{"lfork", []ParamType{TDir}, 15, 1000, "long fork", ParamModeIndex, false, true},
+	{"aff", []ParamType{TReg}, 16, 2, "display reg", ParamModeDynamic, true, false},
 }
 
 // Header.

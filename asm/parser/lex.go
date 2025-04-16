@@ -15,12 +15,14 @@ const eof = -1
 type itemType int
 
 const (
-	itemError itemType = iota // Error occurred; value is text of (a single) error.
+	itemError itemType = iota // Error occurred; value is text of error.
 	itemNewline
 	itemIdentifier
+	itemNumber
 	itemComment
 	itemRawString // Raw string, including quotes.
-	itemColumn
+	itemLabel
+	itemLabelRef
 	itemComa
 	itemPercent
 	itemEOF // End of the input.
@@ -38,12 +40,16 @@ func (it itemType) String() string {
 		return "<newline>"
 	case itemIdentifier:
 		return "<identifier>"
+	case itemNumber:
+		return "<number>"
 	case itemComment:
 		return "<comment>"
 	case itemRawString:
 		return "<raw string>"
-	case itemColumn:
-		return "<column>"
+	case itemLabel:
+		return "<label>"
+	case itemLabelRef:
+		return "<label ref>"
 	case itemComa:
 		return "<coma>"
 	case itemPercent:
@@ -206,48 +212,104 @@ func lexText(l *lexer) stateFn {
 		return l.emit(itemEOF)
 	}
 	l.ignore() // ignore leading whitespace.
-	switch r := l.peek(); r {
-	case '\n':
+	switch r := l.peek(); {
+	case r == '\n':
 		l.acceptRun(" \t\n")
 		l.ignore()
 		if l.atEOF {
 			return l.emit(itemEOF)
 		}
 		return l.emit(itemNewline)
-	case op.DirectiveChar:
+	case r == op.DirectiveChar:
 		return lexDirective
-	case '"':
+	case r == '"':
 		return lexString
-	case op.LabelChar:
-		l.pos++
-		return l.emit(itemColumn)
-	case op.SeparatorChar:
+	case r == op.LabelChar:
+		return lexLabelRef
+	case r == op.SeparatorChar:
 		l.pos++
 		return l.emit(itemComa)
-	case op.DirectChar:
+	case r == op.DirectChar:
 		l.pos++
 		return l.emit(itemPercent)
-	case '-', '+':
-		l.pos++
-		return lexIdentifier
-	default:
-		if strings.ContainsRune(op.CommentChars, r) {
-			return lexComment
-		}
-
+	case r == '-' || r == '+' || ('0' <= r && r <= '9'):
+		return lexNumber
+	case strings.ContainsRune(op.CommentChars, r):
+		return lexComment
+	case strings.ContainsRune(op.LabelChars, r):
 		// NOTE: All instruction chars are within the label set.
-		if strings.ContainsRune(op.LabelChars, r) {
-			return lexIdentifier
-		}
+		return lexIdentifier
+
+	// Make sure to check codechars after label chars.
+	case strings.ContainsRune(op.RawCodeChars, r):
+		return lexRawCode
+
+	default:
 		return l.errorf("unexpected character %c", r)
 	}
 }
 
+func lexLabelRef(l *lexer) stateFn {
+	l.pos++
+	l.ignore()
+	l.acceptRun(op.LabelChars)
+	return l.emit(itemLabelRef)
+}
+
+func lexRawCode(l *lexer) stateFn {
+	l.acceptRun(op.RawCodeChars)
+	return l.emit(itemIdentifier)
+}
+
+func lexNumber(l *lexer) stateFn {
+	// Optional leading sign.
+	l.accept("+-")
+
+	// Deciment digits charset.
+	digits := "0123456789_"
+
+	// Does it have a specific base?
+	// If so, change the charset.
+	if l.accept("0") {
+		if l.accept("xX") {
+			digits = "0123456789abcdefABCDEF_"
+		} else if l.accept("oO") {
+			digits = "01234567_"
+		} else if l.accept("bB") {
+			digits = "01_"
+		}
+	}
+
+	// Consume the charset.
+	l.acceptRun(digits)
+
+	// NOTE: We don't support floating point, scientific notation nor imaginary numbers.
+
+	r := l.peek()
+	// If the next rune is in the label set or :, it is a label string, not a number.
+	if r == op.LabelChar {
+		return lexIdentifier
+	} else if strings.ContainsRune(op.LabelChars, r) {
+		l.next()
+		return lexIdentifier
+	}
+
+	// Otherwise, we emit the number.
+	return l.emit(itemNumber)
+}
+
 func lexIdentifier(l *lexer) stateFn {
-	l.acceptRun("-+")
 	l.acceptRun(op.LabelChars) // NOTE: All instruction chars are within the label set.
 	if l.atEOF {
 		return l.emit(itemEOF)
+	}
+	// If the identifier is directly followed by a label char,
+	// it is a label.
+	if l.peek() == op.LabelChar {
+		l.emit(itemLabel)
+		l.pos++
+		l.ignore()
+		return nil
 	}
 	return l.emit(itemIdentifier)
 }
@@ -303,7 +365,7 @@ func (l *lexer) nextItem() item {
 		state = state(l)
 		if state == nil {
 			//fmt.Printf("lexer: %s\n", l.item)
-			//time.Sleep(100e6)
+			// time.Sleep(100e6)
 			return l.item
 		}
 	}
