@@ -38,7 +38,7 @@ func compile(inputName, inputData string) ([]byte, *parser.Parser, error) {
 		return nil, nil, fmt.Errorf("failed to encode program: %w", err)
 	}
 
-	return program, p, nil
+	return program, pr.Parser, nil
 
 }
 

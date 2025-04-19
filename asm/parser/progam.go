@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"go.creack.net/corewar/op"
 )
@@ -78,7 +79,9 @@ func (p *Program) Decode(data []byte, strict bool) (*Parser, error) {
 	if len(data) > op.MemSize {
 		return nil, fmt.Errorf("program size %d exceeds memory size %d", len(data), op.MemSize)
 	}
-	p.buf = data
+	p.buf = make([]byte, len(data))
+	copy(p.buf, data)
+
 	p.Parser = &Parser{}
 	if err := p.DecodeHeader(strict); err != nil {
 		return nil, fmt.Errorf("failed to decode header: %w", err)
@@ -103,8 +106,8 @@ func (p *Program) Decode(data []byte, strict bool) (*Parser, error) {
 }
 
 func (p *Program) DecodeHeader(strict bool) error {
-	h := op.ChampionHeader{}
-	headerSize, nameLength, commentLength := h.StructSize()
+	h := op.Header{}
+	headerSize, nameLength, commentLength := op.HeaderStructSize()
 
 	if len(p.buf) < headerSize {
 		return fmt.Errorf("invalid header size")
@@ -123,11 +126,9 @@ func (p *Program) DecodeHeader(strict bool) error {
 	p.idx += nameLength
 
 	h.ProgSize = op.Endian.Uint32(p.buf[p.idx : p.idx+4])
-	fmt.Printf("ProgSize: %d, idx: %d\n", h.ProgSize, p.idx)
 	p.idx += 4
 
 	copy(h.Comment[:], p.buf[p.idx:p.idx+commentLength])
-	fmt.Printf("comment: %q, idx: %d\n", cStrToString(h.Comment[:]), p.idx)
 	p.idx += commentLength
 
 	if p.idx >= len(p.buf) {
@@ -142,13 +143,13 @@ func (p *Program) DecodeHeader(strict bool) error {
 	}
 
 	p.Parser.Nodes = append(p.Parser.Nodes, &Directive{
-		Name:  "name",
+		Name:  strings.TrimPrefix(op.NameCmdString, string(op.DirectiveChar)),
 		Value: cStrToString(h.ProgName[:]),
 	})
 
 	if comment := cStrToString(h.Comment[:]); comment != "" {
 		p.Parser.Nodes = append(p.Parser.Nodes, &Directive{
-			Name:  "comment",
+			Name:  strings.TrimPrefix(op.CommentCmdString, string(op.DirectiveChar)),
 			Value: comment,
 		})
 	}

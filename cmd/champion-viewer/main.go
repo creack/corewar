@@ -95,7 +95,7 @@ func dump(vm []byte, pc uint32) string {
 		colors[elem] = nextColor()
 	}
 
-	headerSize, nameFieldSize, commentFieldSize := (op.ChampionHeader{}).StructSize()
+	headerSize, nameFieldSize, commentFieldSize := (op.Header{}).StructSize()
 	_ = commentFieldSize
 	vm = vm[:headerSize]
 

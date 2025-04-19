@@ -1,40 +1,15 @@
-package main
+// Package main is the entry point of the program.
+package vm
 
 import (
-	"bytes"
+	_ "embed"
 	"fmt"
 	"log"
 	"slices"
-	"time"
 
 	"go.creack.net/corewar/asm/parser"
 	"go.creack.net/corewar/op"
 )
-
-func dump(vm []byte, pc uint32) {
-	zz := make([]byte, 32)
-	for i := 0; i < len(vm); {
-		b := vm[i]
-		if i%32 == 0 {
-			if bytes.Equal(vm[i:i+32], zz) {
-				fmt.Printf("\n*")
-				for ; i < len(vm) && bytes.Equal(vm[i:i+32], zz); i += 32 {
-				}
-				continue
-			}
-			fmt.Printf("\n0x%04X:", i)
-		}
-		if i == int(pc) {
-			fmt.Printf("\033[7m")
-		}
-		fmt.Printf(" %02x", b)
-		if i == int(pc) {
-			fmt.Printf("\033[27m")
-		}
-		i++
-	}
-	fmt.Printf("\n")
-}
 
 type Player struct {
 	Name      string
@@ -44,36 +19,57 @@ type Player struct {
 	Carry     bool
 	Dead      bool
 
-	curInstruction *parser.Instruction
-	waitCycles     int
-	lastAlive      int // Cycle since last seen alive.
+	CurInstruction *parser.Instruction
+	WaitCycles     int
+	LastAlive      int // Cycle since last seen alive.
 }
 
 type Corewar struct {
-	ram []byte
+	Ram []byte
 
-	players   []*Player
-	curPlayer int
+	Players   []*Player
+	CurPlayer int
+	Cycle     int
+}
+
+// NextCycle advances the cycle counter until a player is ready to go.
+// Useful when everyone is waiting for a long instruction like fork.
+func (cw *Corewar) NextCycle() {
+	cycles := -1
+
+	for _, p := range cw.Players {
+		if cycles == -1 || p.WaitCycles < cycles {
+			cycles = p.WaitCycles
+		}
+	}
+	if cycles == -1 {
+		cycles = 1
+	}
+
+	cw.Cycle += cycles
+	for _, p := range cw.Players {
+		p.WaitCycles -= cycles
+	}
 }
 
 // TODO: Add proper support for circular memory, modulor is not enough,
 //
 //	if we read at op.MemSize-1 4 bytes, it should read 3 bytes at the start.
 func (cw *Corewar) GetRamValue32(addr uint32) uint32 {
-	return op.Endian.Uint32(cw.ram[addr%uint32(len(cw.ram)):])
+	return op.Endian.Uint32(cw.Ram[addr%uint32(len(cw.Ram)):])
 }
 
 func (cw *Corewar) GetRamValueIndex(pc uint32, idx int16, mod int64) uint16 {
-	return op.Endian.Uint16(cw.ram[(int64(pc)+(int64(idx)%mod))%int64(len(cw.ram)):])
+	return op.Endian.Uint16(cw.Ram[(int64(pc)+(int64(idx)%mod))%int64(len(cw.Ram)):])
 }
 
 func (cw *Corewar) SetRamValue(addr uint32, value uint32) {
-	op.Endian.PutUint32(cw.ram[addr%uint32(len(cw.ram)):], value)
+	op.Endian.PutUint32(cw.Ram[addr%uint32(len(cw.Ram)):], value)
 }
 
 // Returns true if the PC should be updated.
 func (cw *Corewar) Exec(p *Player) bool {
-	ins := p.curInstruction
+	ins := p.CurInstruction
 
 	// NOTE: The parameters have already been validated.
 	params := make([]uint32, 0, len(ins.Params))
@@ -106,16 +102,17 @@ func (cw *Corewar) Exec(p *Player) bool {
 	switch ins.OpCode.Code {
 	case 0x00: // noop.
 	case 0x01: // live.
-		i := slices.IndexFunc(cw.players, func(p *Player) bool { return p.Number == int(params[0]) })
-		if i == -1 || i >= len(cw.players) {
+		i := slices.IndexFunc(cw.Players, func(p *Player) bool { return p.Number == int(params[0]) })
+		if i == -1 || i >= len(cw.Players) || cw.Players[i].Dead {
 			break
 		}
-		targetPlayer := cw.players[i]
-		fmt.Printf("Player %d (%s) is alive\n", targetPlayer.Number, targetPlayer.Name)
+		targetPlayer := cw.Players[i]
+		_ = targetPlayer
+		//fmt.Printf("Player %d (%s) is alive\n", targetPlayer.Number, targetPlayer.Name)
 	case 0x03: // st.
 		cw.SetRamValue(params[1], params[0])
 	case 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0d, 0x0e:
-		r := params[len(params)-1] - 1 // The register is the last parameter, -1 as it starts at 1.
+		r := params[len(params)-1] // The register is the last parameter.
 		switch ins.OpCode.Code {
 		case 0x02, 0x0d: // ld, lld.
 			p.Registers[r] = params[0]
@@ -141,7 +138,7 @@ func (cw *Corewar) Exec(p *Player) bool {
 		if !p.Carry {
 			break
 		}
-		newPC := uint32((int64(p.PC) + (int64(int16(params[0])) % op.IdxMod)) % int64(len(cw.ram)))
+		newPC := uint32((int64(p.PC) + (int64(int16(params[0])) % op.IdxMod)) % int64(len(cw.Ram)))
 		//time.Sleep(20e9)
 		p.PC = newPC
 		return false
@@ -154,8 +151,9 @@ func (cw *Corewar) Exec(p *Player) bool {
 			mod = 1
 		}
 		newPlayer := *p
-		newPlayer.PC = uint32((int64(p.PC) + (int64(int16(params[0])) % mod)) % int64(len(cw.ram)))
-		cw.players = append(cw.players, &newPlayer)
+		newPlayer.CurInstruction = nil
+		newPlayer.PC = uint32((int64(p.PC) + (int64(int16(params[0])) % mod)) % int64(len(cw.Ram)))
+		cw.Players = append(cw.Players, &newPlayer)
 	case 0x10: // aff.
 		fmt.Printf("%c\n", params[0]%256)
 	}
@@ -163,45 +161,57 @@ func (cw *Corewar) Exec(p *Player) bool {
 	return true
 }
 
-func (cw *Corewar) playerTurn() error {
-	p := cw.players[cw.curPlayer]
+// PlayerTurn executes the current player's instruction.
+func (cw *Corewar) PlayerTurn() error {
+	defer func() {
+		cw.CurPlayer++
+		cw.CurPlayer %= len(cw.Players)
+	}()
+	p := cw.Players[cw.CurPlayer]
 
 	// If the player is waiting for it's instruction to be executed,
-	// decrement the wait cycles and return.
-	if p.waitCycles > 0 {
-		p.waitCycles--
+	// nothnig to do.
+	// WaitCycle gets decremented by NextCycle().
+	if p.WaitCycles > 0 {
 		return nil
 	}
 
 	// If we had an instruction buffered, execute it.
-	if p.curInstruction != nil {
+	if p.CurInstruction != nil {
 		if cw.Exec(p) {
-			p.PC += uint32(p.curInstruction.Size)
+			p.PC += uint32(p.CurInstruction.Size)
+			p.PC %= uint32(len(cw.Ram))
 		}
 	}
 
 	// Decode the next instruction.
-	ins, _, err := parser.DecodeNextInstruction(cw.ram[p.PC:])
+	ins, _, err := parser.DecodeNextInstruction(cw.Ram[p.PC:])
 	if err != nil {
 		// If the instruction is not valid, we consider it as a no-op.
 		p.PC++
+		p.PC %= uint32(len(cw.Ram))
 		return nil
 	}
-	p.curInstruction = ins
-	p.waitCycles = int(ins.OpCode.Cycles)
+	p.CurInstruction = ins
+	p.WaitCycles = int(ins.OpCode.Cycles)
 
 	return nil
 }
 
-func NewCorewar(memSize int) *Corewar {
-	headerlen, _, _ := op.Header{}.StructSize()
-
-	playersData := [][]byte{
-		// dataDeathIvan,
-		// dataDeathMy,
-		// dataZorkMy,
-		// dataZorkMy,
+func (cw *Corewar) Round() error {
+	players := cw.Players
+	for _, p := range players {
+		if err := cw.PlayerTurn(); err != nil {
+			// TODO: Consider adding a process id.
+			return fmt.Errorf("failed to execute player %d turn: %w", p.Number, err)
+		}
 	}
+	return nil
+}
+
+func NewCorewar(memSize int, playersData [][]byte) *Corewar {
+	headerlen, _, _ := op.HeaderStructSize()
+
 	players := make([]*Player, 0, len(playersData))
 	ram := make([]byte, op.MemSize)
 	for i, data := range playersData {
@@ -222,36 +232,7 @@ func NewCorewar(memSize int) *Corewar {
 	}
 
 	return &Corewar{
-		ram:     ram,
-		players: players,
-	}
-}
-
-func test() error {
-	cw := NewCorewar(op.MemSize)
-	if len(cw.players) == 0 {
-		return fmt.Errorf("no players found")
-	}
-	dump(cw.ram, 0)
-
-	cw.curPlayer = 0
-	for range 30 {
-		fmt.Printf("\033[2J\033[H%d\n", cw.players[cw.curPlayer].PC)
-		if err := cw.playerTurn(); err != nil {
-			return fmt.Errorf("failed to execute instruction: %w", err)
-		}
-		dump(cw.ram, cw.players[cw.curPlayer].PC)
-		cw.curPlayer++
-		cw.curPlayer %= len(cw.players)
-		time.Sleep(100e6)
-	}
-
-	return nil
-}
-
-func main() {
-	if err := test(); err != nil {
-		println("Fail:", err.Error())
-		return
+		Ram:     ram,
+		Players: players,
 	}
 }

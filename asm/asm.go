@@ -23,16 +23,16 @@ func Compile(inputName, inputData string, strict bool) ([]byte, *parser.Program,
 	}
 
 	// Create the header.
-	header := op.ChampionHeader{
+	header := op.Header{
 		Magic:    op.CorewarExecMagic,
 		ProgSize: uint32(pr.Size()),
 	}
-	name := p.GetDirective("name")
+	name := p.GetDirective(op.NameCmdString)
 	if name == "" {
 		return nil, nil, fmt.Errorf("missing program name")
 	}
 	copy(header.ProgName[:], []byte(name))
-	comment := p.GetDirective("comment")
+	comment := p.GetDirective(op.CommentCmdString)
 	if len(comment) > op.CommentLength {
 		return nil, nil, fmt.Errorf("comment exceeds maximum length")
 	}

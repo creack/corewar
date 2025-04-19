@@ -35,6 +35,7 @@ func NewParser(name, input string) *Parser {
 
 // GetDirective returns the last value of the given directive key.
 func (p *Parser) GetDirective(name string) string {
+	name = strings.TrimPrefix(name, string(op.DirectiveChar))
 	var out string
 	for _, elem := range p.Nodes {
 		if d, ok := elem.(*Directive); ok && d.Name == name {

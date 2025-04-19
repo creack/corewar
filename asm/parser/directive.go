@@ -56,7 +56,7 @@ func (d *Directive) PrettyPrint(nodes []Node) string {
 		}
 	}
 	if d.Value != "" {
-		if d.Name == "code" {
+		if string(op.DirectiveChar)+d.Name == op.CodeCmdString {
 			out += " " + d.Value
 		} else {
 			out += " \"" + d.Value + "\""
@@ -68,11 +68,11 @@ func (d *Directive) PrettyPrint(nodes []Node) string {
 func (d Directive) Encode(p *Program) ([]byte, error) {
 	startIdx := p.idx
 
-	if d.Name == "extend" {
+	if string(op.DirectiveChar)+d.Name == op.ExtendCmdString {
 		p.extendModeEnabled = true
 		return nil, nil
 	}
-	if d.Name != "code" {
+	if string(op.DirectiveChar)+d.Name != op.CodeCmdString {
 		// Unless we have the 'code' directive, we don't encode anything.
 		return nil, nil
 	}
