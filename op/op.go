@@ -10,12 +10,12 @@ var Endian = binary.BigEndian
 const (
 	MemSize       = 6 * 1024 // 6Kb.
 	IdxMod        = 512      // Index modulo.
-	MaxArgsNumber = 4        // This may not be changed. Arbitrary rule.
+	MaxArgsNumber = 4        // This may not be changed. Arbitrary rule. // TODO: Add validation for this.
 )
 
 const (
 	RegisterCount = 16 // r1 <--> r16
-	RegisterSize  = 4  // Size of each register in bytes.
+	RegisterSize  = 4  // Size of each register in bytes. Hard-coded to uint32. Can't be changed.
 )
 
 // ParamType enum type.
@@ -37,6 +37,19 @@ func (pt ParamType) Encoding() byte {
 		return 0b10
 	case TInd, TLab:
 		return 0b11
+	default:
+		return 0
+	}
+}
+
+func (ParamType) Decoding(b byte) ParamType {
+	switch b {
+	case 0b01:
+		return TReg
+	case 0b10:
+		return TDir
+	case 0b11:
+		return TInd
 	default:
 		return 0
 	}
@@ -99,16 +112,13 @@ type ParamMode int
 
 const (
 	ParamModeDynamic ParamMode = iota // Encoded based on the opcode parameter type.
-	ParamModeValue                    // Always encoded as Direct value.
-	ParamModeIndex                    // Always encoded as Indirect (index) value.
+	ParamModeIndex                    // Always encoded as index (2 bytes) even for direct parameters.
 )
 
 func (am ParamMode) String() string {
 	switch am {
 	case ParamModeDynamic:
 		return "dynamic"
-	case ParamModeValue:
-		return "value"
 	case ParamModeIndex:
 		return "index"
 	default:
@@ -118,34 +128,36 @@ func (am ParamMode) String() string {
 
 // OpCode is the definition of instructions.
 type OpCode struct {
-	Name         string
-	ParamTypes   []ParamType
-	Code         byte
-	Cycles       int
-	Comment      string
+	// Original fields.
+	Name       string
+	ParamTypes []ParamType
+	Code       byte
+	Cycles     int
+	Comment    string
+
+	// Added for ease of use.
 	ParamMode    ParamMode
 	EncodingByte bool
-	SetCarry     bool
 }
 
 var OpCodeTable = []OpCode{
-	{"noop", nil, 0, 0, "noop", 0, false, false},
-	{"live", []ParamType{TDir}, 1, 10, "alive", 0, false, false},
-	{"ld", []ParamType{TDir | TInd, TReg}, 2, 5, "load", 0, true, true},
-	{"st", []ParamType{TReg, TInd | TReg}, 3, 5, "store", ParamModeIndex, true, false},
-	{"add", []ParamType{TReg, TReg, TReg}, 4, 10, "addition", ParamModeValue, true, true},
-	{"sub", []ParamType{TReg, TReg, TReg}, 5, 10, "subtraction", ParamModeValue, true, true},
-	{"and", []ParamType{TReg | TDir | TInd, TReg | TInd | TDir, TReg}, 6, 6, "and  r1,r2,r3   r1&r2 -> r3", ParamModeValue, true, true},
-	{"or", []ParamType{TReg | TInd | TDir, TReg | TInd | TDir, TReg}, 7, 6, "or   r1,r2,r3   r1|r2 -> r3", ParamModeValue, true, true},
-	{"xor", []ParamType{TReg | TInd | TDir, TReg | TInd | TDir, TReg}, 8, 6, "xor  r1,r2,r3   r1^r2 -> r3", ParamModeValue, true, true},
-	{"zjmp", []ParamType{TDir}, 9, 20, "jump if zero", ParamModeIndex, false, false},
-	{"ldi", []ParamType{TReg | TDir | TInd, TDir | TReg, TReg}, 10, 25, "load index", ParamModeIndex, true, true},
-	{"sti", []ParamType{TReg, TReg | TDir | TInd, TDir | TReg}, 11, 25, "store index", ParamModeIndex, true, false},
-	{"fork", []ParamType{TDir}, 12, 800, "fork", ParamModeIndex, false, false},
-	{"lld", []ParamType{TDir | TInd, TReg}, 13, 10, "long load", ParamModeValue, true, true},
-	{"lldi", []ParamType{TReg | TDir | TInd, TDir | TReg, TReg}, 14, 50, "long load index", ParamModeIndex, true, true},
-	{"lfork", []ParamType{TDir}, 15, 1000, "long fork", ParamModeIndex, false, true},
-	{"aff", []ParamType{TReg}, 16, 2, "display reg", ParamModeDynamic, true, false},
+	{"noop", nil, 0, 0, "noop", 0, false},
+	{"live", []ParamType{TDir}, 1, 10, "alive", 0, false},
+	{"ld", []ParamType{TDir | TInd, TReg}, 2, 5, "load", 0, true},
+	{"st", []ParamType{TReg, TInd | TReg}, 3, 5, "store", 0, true},
+	{"add", []ParamType{TReg, TReg, TReg}, 4, 10, "addition", 0, true},
+	{"sub", []ParamType{TReg, TReg, TReg}, 5, 10, "subtraction", 0, true},
+	{"and", []ParamType{TReg | TDir | TInd, TReg | TInd | TDir, TReg}, 6, 6, "and  r1,r2,r3   r1&r2 -> r3", 0, true},
+	{"or", []ParamType{TReg | TInd | TDir, TReg | TInd | TDir, TReg}, 7, 6, "or   r1,r2,r3   r1|r2 -> r3", 0, true},
+	{"xor", []ParamType{TReg | TInd | TDir, TReg | TInd | TDir, TReg}, 8, 6, "xor  r1,r2,r3   r1^r2 -> r3", 0, true},
+	{"zjmp", []ParamType{TDir}, 9, 20, "jump if zero", ParamModeIndex, false},
+	{"ldi", []ParamType{TReg | TDir | TInd, TDir | TReg, TReg}, 10, 25, "load index", ParamModeIndex, true},
+	{"sti", []ParamType{TReg, TReg | TDir | TInd, TDir | TReg}, 11, 25, "store index", ParamModeIndex, true},
+	{"fork", []ParamType{TDir}, 12, 800, "fork", ParamModeIndex, false},
+	{"lld", []ParamType{TDir | TInd, TReg}, 13, 10, "long load", 0, true},
+	{"lldi", []ParamType{TReg | TDir | TInd, TDir | TReg, TReg}, 14, 50, "long load index", ParamModeIndex, true},
+	{"lfork", []ParamType{TDir}, 15, 1000, "long fork", ParamModeIndex, false},
+	{"aff", []ParamType{TReg}, 16, 2, "display reg", 0, true},
 }
 
 // Header.
@@ -162,9 +174,35 @@ type ChampionHeader struct {
 	Comment  [CommentLength + 1]byte
 }
 
+// StructSize returns the size of the header struct.
+// Similar to unsafe.Sizeof, but allow disabling alignment,
+// and use hardcoded values instead of the dynamic ones based
+// on the current system/architecture.
+// Return the full size, the size of the name and comment fields.
+func (h ChampionHeader) StructSize() (headerSize, nameLength, commentLength int) {
+	align := 4      // Align on 4 bytes.
+	headerSize += 4 // magic number.
+
+	nameLength = ProgNameLength + 1
+	if n := nameLength % align; n != 0 {
+		nameLength += (align - n)
+	}
+	headerSize += nameLength
+
+	headerSize += 4 // prog size.
+
+	commentLength = CommentLength + 1
+	if n := commentLength % align; n != 0 {
+		commentLength += (align - n)
+	}
+	headerSize += commentLength
+
+	return headerSize, nameLength, commentLength
+}
+
 // VM settings.
 const (
 	CyclesToDie = 1536 // Number of cycles to be declared dead.
-	CycleDelay  = 5
-	NumLives    = 40
+	NumLives    = 40   // Number of 'live' calls before updating CyclesToDie.
+	CycleDelta  = 5    // Number of cycles to be remove from CyclesToDie after NumLives.
 )

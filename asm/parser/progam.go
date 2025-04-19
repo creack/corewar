@@ -1,13 +1,15 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
+	"log"
 
 	"go.creack.net/corewar/op"
 )
 
 type Program struct {
-	p *Parser
+	*Parser
 
 	buf              []byte
 	idx              int
@@ -16,11 +18,12 @@ type Program struct {
 	hasMissingLabels bool
 
 	extendModeEnabled bool
+	strict            bool
 }
 
-func NewProgram(p *Parser) *Program {
+func NewProgram(p *Parser, strict bool) *Program {
 	return &Program{
-		p: p,
+		Parser: p,
 
 		buf:               make([]byte, op.MemSize),
 		idx:               0,
@@ -28,6 +31,7 @@ func NewProgram(p *Parser) *Program {
 		hasLabelIndex:     false,
 		hasMissingLabels:  false,
 		extendModeEnabled: false,
+		strict:            strict,
 	}
 }
 
@@ -43,8 +47,8 @@ func (p *Program) encode() error {
 		p.labels = map[string]int{}
 	}
 	p.idx = 0
-	for _, n := range p.p.Nodes {
-		if err := n.Encode(p); err != nil {
+	for _, n := range p.Parser.Nodes {
+		if _, err := n.Encode(p); err != nil {
 			return fmt.Errorf("failed to encode instruction %s: %w", n, err)
 		}
 	}
@@ -57,8 +61,7 @@ func (p *Program) Encode() ([]byte, error) {
 		return nil, fmt.Errorf("failed to first encode program: %w", err)
 	}
 
-	// If we don't have any missing labels, we don't need to re-encode,
-	// return nil label map to indicate that.
+	// If we don't have any missing labels, we don't need to re-encode.
 	if !p.hasMissingLabels {
 		return p.buf[:p.idx], nil
 	}
@@ -69,4 +72,95 @@ func (p *Program) Encode() ([]byte, error) {
 	}
 
 	return p.buf[:p.idx], nil
+}
+
+func (p *Program) Decode(data []byte, strict bool) (*Parser, error) {
+	if len(data) > op.MemSize {
+		return nil, fmt.Errorf("program size %d exceeds memory size %d", len(data), op.MemSize)
+	}
+	p.buf = data
+	p.Parser = &Parser{}
+	if err := p.DecodeHeader(strict); err != nil {
+		return nil, fmt.Errorf("failed to decode header: %w", err)
+	}
+
+	for p.idx < len(p.buf) {
+		ins, idx, err := DecodeNextInstruction(p.buf[p.idx:])
+		if err != nil {
+			if errors.Is(err, ErrInvalidOpcode) {
+				// TODO: Handle this. Likely .code directive.
+				// Look for the offset with the most valid instructions,
+				// as the raw code could contain part of the instruction.
+				p.idx++
+				continue
+			}
+			return nil, fmt.Errorf("failed to decode instruction: %w", err)
+		}
+		p.idx += idx
+		p.Parser.Nodes = append(p.Parser.Nodes, ins)
+	}
+	return p.Parser, nil
+}
+
+func (p *Program) DecodeHeader(strict bool) error {
+	h := op.ChampionHeader{}
+	headerSize, nameLength, commentLength := h.StructSize()
+
+	if len(p.buf) < headerSize {
+		return fmt.Errorf("invalid header size")
+	}
+
+	p.idx = 0
+	h.Magic = op.Endian.Uint32(p.buf[p.idx : p.idx+4])
+	p.idx += 4
+	if h.Magic != op.CorewarExecMagic {
+		if strict {
+			return fmt.Errorf("invalid magic number: %x, expect %x", h.Magic, op.CorewarExecMagic)
+		}
+		log.Printf("Warning: invalid magic number: %x, expect %x", h.Magic, op.CorewarExecMagic)
+	}
+	copy(h.ProgName[:], p.buf[p.idx:p.idx+nameLength])
+	p.idx += nameLength
+
+	h.ProgSize = op.Endian.Uint32(p.buf[p.idx : p.idx+4])
+	fmt.Printf("ProgSize: %d, idx: %d\n", h.ProgSize, p.idx)
+	p.idx += 4
+
+	copy(h.Comment[:], p.buf[p.idx:p.idx+commentLength])
+	fmt.Printf("comment: %q, idx: %d\n", cStrToString(h.Comment[:]), p.idx)
+	p.idx += commentLength
+
+	if p.idx >= len(p.buf) {
+		return fmt.Errorf("no code after header")
+	}
+
+	if p.idx+int(h.ProgSize) != len(p.buf) {
+		if strict {
+			return fmt.Errorf("program size from header doesn't match actual code size, header: %d, actual: %d", h.ProgSize, len(p.buf)-p.idx)
+		}
+		log.Printf("Warning: program size from header doesn't match actual code size, header: %d, actual: %d\n", h.ProgSize, len(p.buf)-p.idx)
+	}
+
+	p.Parser.Nodes = append(p.Parser.Nodes, &Directive{
+		Name:  "name",
+		Value: cStrToString(h.ProgName[:]),
+	})
+
+	if comment := cStrToString(h.Comment[:]); comment != "" {
+		p.Parser.Nodes = append(p.Parser.Nodes, &Directive{
+			Name:  "comment",
+			Value: comment,
+		})
+	}
+
+	return nil
+}
+
+func cStrToString(cstr []byte) string {
+	for i, b := range cstr {
+		if b == 0 {
+			return string(cstr[:i])
+		}
+	}
+	return string(cstr)
 }

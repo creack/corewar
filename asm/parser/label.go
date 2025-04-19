@@ -22,7 +22,7 @@ func (l *Label) PrettyPrint(nodes []Node) string {
 	panic("self reference not found in nodes")
 }
 
-func (l Label) Encode(p *Program) error {
+func (l Label) Encode(p *Program) ([]byte, error) {
 	p.labels[l.Name] = p.idx
-	return nil
+	return nil, nil
 }

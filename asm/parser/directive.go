@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -64,30 +65,36 @@ func (d *Directive) PrettyPrint(nodes []Node) string {
 	return out
 }
 
-func (d Directive) Encode(p *Program) error {
+func (d Directive) Encode(p *Program) ([]byte, error) {
+	startIdx := p.idx
+
 	if d.Name == "extend" {
 		p.extendModeEnabled = true
-		return nil
+		return nil, nil
 	}
 	if d.Name != "code" {
 		// Unless we have the 'code' directive, we don't encode anything.
-		return nil
+		return nil, nil
 	}
 	if !p.extendModeEnabled {
-		return fmt.Errorf(".extend must be set to use .code directive")
+		if p.strict {
+			return nil, fmt.Errorf(".extend must be set to use .code directive")
+		}
+		log.Printf("Warning: .extend must be set to use .code directive")
 	}
 
 	// Parse the raw code as hex.
-	for _, elem := range strings.Split(d.Value, " ") {
+	for elem := range strings.SplitSeq(d.Value, " ") {
 		if len(elem) > 2 {
-			return fmt.Errorf("code directive hex %q is too long", elem)
+			return nil, fmt.Errorf("code directive hex %q is too long", elem)
 		}
 		n, err := strconv.ParseUint(elem, 16, 8)
 		if err != nil {
-			return fmt.Errorf("failed to parse code directive hex %q: %w", elem, err)
+			return nil, fmt.Errorf("failed to parse code directive hex %q: %w", elem, err)
 		}
 		p.buf[p.idx] = byte(n)
 		p.idx++
 	}
-	return nil
+
+	return p.buf[startIdx:p.idx], nil
 }

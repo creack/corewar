@@ -1,2 +1,8 @@
-tmp
+tmp/
 .build
+cmd/asm/asm
+cmd/corewar/corewar
+cmd/disasm/disasm
+reference-projects/
+reference-projects.tar.gz
+playground/

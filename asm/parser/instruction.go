@@ -9,8 +9,35 @@ import (
 )
 
 type Instruction struct {
-	OpCode op.OpCode   // OpCode reference.
-	Params []Parameter // Parameters.
+	OpCode op.OpCode    // OpCode reference.
+	Params []*Parameter // Parameters.
+	Size   int          // In bytes, only set when decoding.
+}
+
+func (ins *Instruction) ParamsDecoding(b byte) error {
+	// If the opcode doesn't have an encoding byte,
+	// use the type from the definition.
+	if !ins.OpCode.EncodingByte {
+		for _, elem := range ins.OpCode.ParamTypes {
+			ins.Params = append(ins.Params, &Parameter{Typ: elem})
+		}
+		return nil
+	}
+
+	// Reverse the process of the encoding byte.
+	for i, validTypes := range ins.OpCode.ParamTypes {
+		t := new(op.ParamType).Decoding((b >> byte((3-i)*2)) & 0b11)
+		if t == 0 {
+			return fmt.Errorf("invalid encoding byte %x for %q", b, ins.OpCode.Name)
+		}
+
+		if t&validTypes == 0 {
+			return fmt.Errorf("invalid parameter %d type %q for %q, expected %q", i+1, t, ins.OpCode.Name, validTypes)
+		}
+		ins.Params = append(ins.Params, &Parameter{Typ: t})
+	}
+
+	return nil
 }
 
 // Generate the encoding byte for the instruction based on
@@ -68,7 +95,7 @@ func (ins Instruction) ValidateParameters() error {
 	}
 
 	for _, param := range ins.Params {
-		if param.Value == "" {
+		if param.RawValue == "" {
 			return fmt.Errorf("parameter value cannot be empty")
 		}
 	}
@@ -76,7 +103,7 @@ func (ins Instruction) ValidateParameters() error {
 	return nil
 }
 
-func (ins Instruction) Encode(p *Program) error {
+func (ins Instruction) Encode(p *Program) ([]byte, error) {
 	// Has labels are indexed from the instruction start
 	// keep track of it.
 	idxInstruction := p.idx
@@ -93,22 +120,23 @@ func (ins Instruction) Encode(p *Program) error {
 	// Encode each param.
 	for _, param := range ins.Params {
 		// Handle case for label references.
-		if strings.HasPrefix(param.Value, string(op.LabelChar)) {
+		if param.Resolved == "" && strings.HasPrefix(param.RawValue, string(op.LabelChar)) {
 			// If we already know the label, we can
 			// replace the it with mdmdhe offset.
 			// Otherwise, keep going, it will be known the second time.
-			if _, ok := p.labels[param.Value[1:]]; ok {
-				param.Value = strconv.Itoa(p.labels[param.Value[1:]] - idxInstruction)
+			if _, ok := p.labels[param.RawValue[1:]]; ok {
+				param.Value = int64(p.labels[param.RawValue[1:]] - idxInstruction)
+				param.Resolved = strconv.Itoa(int(param.Value))
 			} else if !p.hasLabelIndex {
 				p.hasMissingLabels = true
 			} else {
 				// If we don't know the label while having
 				// the labels index, error out.
-				return fmt.Errorf("unknown label %q", param.Value)
+				return nil, fmt.Errorf("unknown label %q", param.RawValue)
 			}
 		}
 		for i, elem := range param.Modifiers {
-			if !strings.HasPrefix(elem.raw, string(op.LabelChar)) {
+			if elem.resolved != "" || !strings.HasPrefix(elem.raw, string(op.LabelChar)) {
 				continue
 			}
 			if _, ok := p.labels[elem.raw[1:]]; ok {
@@ -118,17 +146,96 @@ func (ins Instruction) Encode(p *Program) error {
 			} else {
 				// If we don't know the label while having
 				// the labels index, error out.
-				return fmt.Errorf("unknown label %q", elem)
+				return nil, fmt.Errorf("unknown label %q", elem)
 			}
 		}
 
 		// Encode the paramter and advance the index.
-		n, err := param.Encode(p.buf[p.idx:], ins.OpCode.ParamMode)
+		n, err := param.Encode(p.buf[p.idx:], ins.OpCode.ParamMode, p.strict)
 		if err != nil {
-			return fmt.Errorf("failed to encode parameter %s: %w", param, err)
+			return nil, fmt.Errorf("failed to encode parameter %s: %w", param, err)
 		}
 		p.idx += n
 	}
 
-	return nil
+	return p.buf[idxInstruction:p.idx], nil
+}
+
+var ErrInvalidOpcode = fmt.Errorf("invalid opcode")
+
+// Decodes the next instruction if valid. Returns the instruction and the
+// how many bytes have been consumed.
+func DecodeNextInstruction(buf []byte) (*Instruction, int, error) {
+	idx := 0
+
+	if len(buf) == 0 {
+		return nil, idx, fmt.Errorf("empty buffer")
+	}
+
+	b := buf[idx]
+	if int(b) >= len(op.OpCodeTable) {
+		return nil, idx, fmt.Errorf("invalid instruction %x: %w", b, ErrInvalidOpcode)
+	}
+
+	idx++
+	if idx >= len(buf) {
+		return nil, idx, fmt.Errorf("invalid instruction, missing encoding and/or parameters")
+	}
+	ins := &Instruction{
+		OpCode: op.OpCodeTable[b],
+	}
+
+	var encodingByte byte
+	if ins.OpCode.EncodingByte {
+		encodingByte = buf[idx]
+		idx++
+		if idx >= len(buf) {
+			return nil, idx, fmt.Errorf("invalid instruction, missing parameters after encoding")
+		}
+	}
+	// Even if we don't have the endoding byte, call the paramsdecoding method.
+	// Will populate the params with the opcode types if needed.
+	if err := ins.ParamsDecoding(encodingByte); err != nil {
+		return nil, idx, fmt.Errorf("failed to decode instruction: %w", err)
+	}
+
+	for _, elem := range ins.Params {
+		if idx >= len(buf) {
+			return nil, idx, fmt.Errorf("invalid instruction, missing parameter data")
+		}
+		// Registers are always 1 byte.
+		if elem.Typ == op.TReg {
+			elem.Value = int64(buf[idx])
+			elem.RawValue = fmt.Sprintf("%d", buf[idx])
+			idx++
+			continue
+		}
+		// In dynamic mode, we need to check the type of the parameter.
+		if ins.OpCode.ParamMode == op.ParamModeDynamic {
+			if elem.Typ == op.TDir {
+				// Direct value, we need to read 4 bytes.
+				elem.Value = int64(op.Endian.Uint32(buf[idx : idx+4]))
+				elem.RawValue = fmt.Sprintf("%d", uint32(elem.Value))
+				idx += 4
+			} else if elem.Typ == op.TInd {
+				// Indirect value, we need to read 2 bytes.
+				elem.Value = int64(op.Endian.Uint16(buf[idx : idx+2]))
+				elem.RawValue = fmt.Sprintf("%d", uint16(elem.Value))
+				idx += 2
+			} else {
+				return nil, idx, fmt.Errorf("invalid parameter type %q for %q", elem.Typ, ins.OpCode.Name)
+			}
+			continue
+		}
+		if ins.OpCode.ParamMode == op.ParamModeIndex {
+			// Always an indirect value, we need to read 2 bytes.
+			elem.Value = int64(op.Endian.Uint16(buf[idx : idx+2]))
+			elem.RawValue = fmt.Sprintf("%d", int16(elem.Value))
+			idx += 2
+			continue
+		}
+		return nil, idx, fmt.Errorf("invalid param mode %q for %q", ins.OpCode.ParamMode, ins.OpCode.Name)
+	}
+	ins.Size = idx
+	return ins, idx, nil
 }

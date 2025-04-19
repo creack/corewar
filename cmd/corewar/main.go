@@ -1,66 +1,15 @@
-// Package main is the entry point of the program.
 package main
 
 import (
 	"bytes"
-	_ "embed"
 	"fmt"
-	"image/color"
 	"log"
 	"slices"
 	"time"
 
-	"github.com/hajimehoshi/ebiten/v2"
-	"go.creack.net/corewar/asm"
 	"go.creack.net/corewar/asm/parser"
 	"go.creack.net/corewar/op"
 )
-
-const (
-	initialScreenWidth  = 800
-	initialScreenHeight = 600
-)
-
-type Game struct {
-}
-
-func (g *Game) Update() error {
-	// Update game logic here
-	if ebiten.IsKeyPressed(ebiten.KeyEscape) {
-		return ebiten.Termination
-	}
-	return nil
-}
-
-func (g *Game) Draw(screen *ebiten.Image) {
-	screen.Fill(color.RGBA{G: 255})
-}
-
-func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
-	// Return the layout of the game
-	return outsideWidth, outsideHeight
-}
-
-func main1() {
-	ebiten.SetWindowTitle("Corewar")
-	ebiten.SetWindowSize(initialScreenWidth, initialScreenHeight)
-	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
-	g := &Game{}
-	if err := ebiten.RunGameWithOptions(g, &ebiten.RunGameOptions{
-		InitUnfocused: false,
-	}); err != nil {
-		log.Fatal(err)
-	}
-}
-
-//go:embed Death-ivan.cor
-var dataDeathIvan []byte
-
-//go:embed Death-my.cor
-var dataDeathMy []byte
-
-//go:embed zork-my.cor
-var dataZorkMy []byte
 
 func dump(vm []byte, pc uint32) {
 	zz := make([]byte, 32)
@@ -200,7 +149,7 @@ func (cw *Corewar) Exec(p *Player) bool {
 		idx := int16(params[1]) + int16(params[2])
 		cw.SetRamValue(uint32(idx), params[0])
 	case 0x0c, 0x0f: // fork, lfork.
-		mod := op.IdxMod
+		mod := int64(op.IdxMod)
 		if ins.OpCode.Code == 0x0f { // lfork is the same s fork but without modulo.
 			mod = 1
 		}
@@ -245,18 +194,18 @@ func (cw *Corewar) playerTurn() error {
 }
 
 func NewCorewar(memSize int) *Corewar {
-	headerlen, _, _ := op.ChampionHeader{}.StructSize(true)
+	headerlen, _, _ := op.ChampionHeader{}.StructSize()
 
 	playersData := [][]byte{
 		// dataDeathIvan,
 		// dataDeathMy,
-		dataZorkMy,
+		// dataZorkMy,
 		// dataZorkMy,
 	}
 	players := make([]*Player, 0, len(playersData))
 	ram := make([]byte, op.MemSize)
 	for i, data := range playersData {
-		p, err := (&parser.Program{}).Decode(data, true, false)
+		p, err := (&parser.Program{}).Decode(data, false)
 		if err != nil {
 			log.Fatalf("failed to decode player %d: %s", i, err)
 		}
@@ -280,6 +229,9 @@ func NewCorewar(memSize int) *Corewar {
 
 func test() error {
 	cw := NewCorewar(op.MemSize)
+	if len(cw.players) == 0 {
+		return fmt.Errorf("no players found")
+	}
 	dump(cw.ram, 0)
 
 	cw.curPlayer = 0
@@ -297,24 +249,7 @@ func test() error {
 	return nil
 }
 
-var zorkBuf = `.name "zork"
-.comment "just a basic living prog"
-
-l2:
-  st r1,%:live+1
-  and r1,%0,r1
-live:
-  live %4
-  zjmp %:live
-`
-
 func main() {
-	buf, _, err := asm.Compile("zork", zorkBuf, false)
-	if err != nil {
-		log.Fatalf("failed to compile: %s", err)
-	}
-	dataZorkMy = buf
-
 	if err := test(); err != nil {
 		println("Fail:", err.Error())
 		return

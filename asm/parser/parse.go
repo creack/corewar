@@ -8,7 +8,7 @@ import (
 )
 
 type Node interface {
-	Encode(*Program) error
+	Encode(*Program) ([]byte, error)
 	PrettyPrint([]Node) string
 }
 
@@ -118,7 +118,7 @@ func (p *Parser) parseIdentifier() error {
 }
 
 func (p *Parser) parseInstructionParameters() error {
-	var param Parameter
+	param := &Parameter{}
 	for {
 		p.nextToken()
 
@@ -131,7 +131,7 @@ func (p *Parser) parseInstructionParameters() error {
 		if p.currToken.typ == itemIdentifier {
 			if strings.HasPrefix(p.currToken.val, string(op.RegisterChar)) {
 				param.Typ = op.TReg
-				param.Value = p.currToken.val[1:]
+				param.RawValue = p.currToken.val[1:]
 			} else {
 				return fmt.Errorf("unexpected identifier %q in %q", p.currToken, p.curInstruction)
 			}
@@ -141,9 +141,9 @@ func (p *Parser) parseInstructionParameters() error {
 		if p.currToken.typ == itemNumber {
 			if param.Typ == 0 { // If we don't have a type yet, it means we are first up, dealing with an indirection.
 				param.Typ = op.TInd
-				param.Value = p.currToken.val
+				param.RawValue = p.currToken.val
 			} else { // If we have a type, it means we are dealing with an arithmetic operation.
-				param.Modifiers = append(param.Modifiers, modifier{raw: p.currToken.val})
+				param.Modifiers = append(param.Modifiers, Modifier{raw: p.currToken.val})
 			}
 			continue
 		}
@@ -152,9 +152,9 @@ func (p *Parser) parseInstructionParameters() error {
 		if p.currToken.typ == itemLabelRef {
 			if param.Typ == 0 {
 				param.Typ = op.TInd
-				param.Value = string(op.LabelChar) + p.currToken.val
+				param.RawValue = string(op.LabelChar) + p.currToken.val
 			} else {
-				param.Modifiers = append(param.Modifiers, modifier{raw: string(op.LabelChar) + p.currToken.val})
+				param.Modifiers = append(param.Modifiers, Modifier{raw: string(op.LabelChar) + p.currToken.val})
 			}
 			continue
 		}
@@ -169,9 +169,9 @@ func (p *Parser) parseInstructionParameters() error {
 
 			// We expect either a column (label reference prefix) or a number.
 			if p.currToken.typ == itemLabelRef {
-				param.Value = string(op.LabelChar) + p.currToken.val
+				param.RawValue = string(op.LabelChar) + p.currToken.val
 			} else if p.currToken.typ == itemNumber {
-				param.Value = p.currToken.val
+				param.RawValue = p.currToken.val
 			} else {
 				return fmt.Errorf("expected number or label reference for direct value, got %s", p.currToken)
 			}
@@ -180,7 +180,7 @@ func (p *Parser) parseInstructionParameters() error {
 
 		if p.currToken.typ == itemComa {
 			p.curInstruction.Params = append(p.curInstruction.Params, param)
-			param = Parameter{}
+			param = &Parameter{}
 			if p.peekToken.typ.isEOL() {
 				return fmt.Errorf("unexpected comma at the end of instruction %s", p.curInstruction)
 			}

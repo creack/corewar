@@ -199,10 +199,13 @@ func (l *lexer) accept(valid string) bool {
 }
 
 // acceptRun consumes a run of runes from the valid set.
-func (l *lexer) acceptRun(valid string) {
+func (l *lexer) acceptRun(valid string) bool {
+	accepted := false
 	for strings.ContainsRune(valid, l.next()) {
+		accepted = true
 	}
 	l.backup()
+	return accepted
 }
 
 // lexText scans until an opening action delimiter, "{{".
@@ -263,7 +266,7 @@ func lexRawCode(l *lexer) stateFn {
 
 func lexNumber(l *lexer) stateFn {
 	// Optional leading sign.
-	l.accept("+-")
+	hasOperator := l.accept("+-")
 
 	// Deciment digits charset.
 	digits := "0123456789_"
@@ -281,7 +284,13 @@ func lexNumber(l *lexer) stateFn {
 	}
 
 	// Consume the charset.
-	l.acceptRun(digits)
+	hasDigits := l.acceptRun(digits)
+
+	// If we only have operator without digit, emit it as a number.
+	// This handles the case for `:labelRef+:labelRef`.
+	if hasOperator && !hasDigits {
+		return l.emit(itemNumber)
+	}
 
 	// NOTE: We don't support floating point, scientific notation nor imaginary numbers.
 
@@ -330,7 +339,7 @@ func lexString(l *lexer) stateFn {
 	l.pos++
 	for {
 		r := l.next()
-		if r == eof || r == '\n' {
+		if r == eof { // NOTE: We allow multi-line strings.
 			return l.errorf("missing closing quote")
 		}
 		if r == '"' {

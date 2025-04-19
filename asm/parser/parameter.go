@@ -2,13 +2,14 @@ package parser
 
 import (
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
 	"go.creack.net/corewar/op"
 )
 
-type modifier struct {
+type Modifier struct {
 	raw      string
 	resolved string
 	n        int64
@@ -18,21 +19,23 @@ type modifier struct {
 // Stored as raw string.
 type Parameter struct {
 	Typ       op.ParamType
-	Value     string
-	Modifiers []modifier // Modifiers for the parameter.
+	Value     int64
+	RawValue  string
+	Resolved  string
+	Modifiers []Modifier // Modifiers for the parameter.
 }
 
 func (p Parameter) String() string {
 	var out string
 	switch p.Typ {
 	case op.TReg:
-		out = string(op.RegisterChar) + p.Value
+		out = string(op.RegisterChar) + p.RawValue
 	case op.TInd:
-		out = p.Value
+		out = p.RawValue
 	case op.TDir:
-		out = string(op.DirectChar) + p.Value
+		out = string(op.DirectChar) + p.RawValue
 	case op.TLab:
-		out = string(op.LabelChar) + p.Value
+		out = string(op.LabelChar) + p.RawValue
 	default:
 		return fmt.Sprintf("unknown param type %d", p.Typ)
 	}
@@ -58,20 +61,30 @@ func parseNumber(in string) (int64, error) {
 // on the paramter type and param mode (from the instruction opcode).
 // If the given buffer is nil, it will not write anything but still return
 // how many bytes would have been written.
-func (p Parameter) Encode(buf []byte, paramMode op.ParamMode) (int, error) {
+func (p Parameter) Encode(buf []byte, paramMode op.ParamMode, strict bool) (int, error) {
+	val := p.Resolved
+	if val == "" {
+		val = p.RawValue
+	}
 	// Parse the value as a number.
-	n, err := parseNumber(p.Value)
-	if err != nil && !strings.HasPrefix(p.Value, string(op.LabelChar)) {
+	n, err := parseNumber(val)
+	p.Value = int64(n)
+	if err != nil && !strings.HasPrefix(val, string(op.LabelChar)) {
 		// If we have a label, it will error out but keep going. Will pass next time around.
-		return 0, fmt.Errorf("parse %q: %w", p.Value, err)
+		return 0, fmt.Errorf("parse %q: %w", val, err)
 	}
 
 	// Apply modifiers if any.
+	// TODO: Handle the case where we have an operator at the end with a missing number.
 	for _, elem := range p.Modifiers {
+		elemVal := elem.resolved
+		if elemVal == "" {
+			elemVal = elem.raw
+		}
 		// If we still have a label reference unresolved,
 		// we can't calculate the value yet. Break away,
 		// next iteration will handle it.
-		if strings.HasPrefix(elem.raw, string(op.LabelChar)) && elem.resolved == "" {
+		if strings.HasPrefix(elemVal, string(op.LabelChar)) && elem.resolved == "" {
 			break
 		}
 		var neg bool
@@ -80,12 +93,9 @@ func (p Parameter) Encode(buf []byte, paramMode op.ParamMode) (int, error) {
 			neg = true
 		case "+":
 		default:
-			if elem.resolved == "" { // If we deal with numbers directly, we don't have anything to resolve.
-				elem.resolved = elem.raw
-			}
-			n1, err := parseNumber(elem.resolved)
+			n1, err := parseNumber(elemVal)
 			if err != nil {
-				return 0, fmt.Errorf("parse modifier %q: %w", elem, err)
+				return 0, fmt.Errorf("parse modifier %q: %w", elemVal, err)
 			}
 			if neg {
 				n1 *= -1
@@ -96,10 +106,13 @@ func (p Parameter) Encode(buf []byte, paramMode op.ParamMode) (int, error) {
 
 	// Simplest case, register.
 	if p.Typ == op.TReg {
-		// NOTE: Technically, it starts at 1, but we have some champions using r0.
-		//       Will be ignored by the vm.
-		if n < 0 || n > op.RegisterCount {
-			return 0, fmt.Errorf("invalid register number %d", n)
+		// NOTE: Registers only go from 1 to op.RegisterCount (16),
+		// when in strict mode, enforce it, otherwise, let it go.
+		if n < 1 || n > op.RegisterCount {
+			if strict {
+				return 0, fmt.Errorf("invalid register number %d", n)
+			}
+			log.Printf("Warning: invalid register number %d for parameter %s", n, p)
 		}
 		if buf != nil {
 			buf[0] = byte(n)
@@ -128,11 +141,6 @@ func (p Parameter) Encode(buf []byte, paramMode op.ParamMode) (int, error) {
 			op.Endian.PutUint16(buf, uint16(n))
 		}
 		return 2, nil
-	case op.ParamModeValue:
-		if buf != nil {
-			op.Endian.PutUint32(buf, uint32(n))
-		}
-		return 4, nil
 	default:
 		return 0, fmt.Errorf("unexpected param mode %q for parameter %q", paramMode, p)
 	}
