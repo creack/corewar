@@ -66,8 +66,7 @@ func (ins Instruction) PrettyPrint(_ []Node) string {
 	for _, param := range ins.Params {
 		paramStrs = append(paramStrs, param.String())
 	}
-	out += "\t" + strings.Join(paramStrs, string(op.SeparatorChar)+" ")
-	return out
+	return fmt.Sprintf("%- 8s %s", out, strings.Join(paramStrs, string(op.SeparatorChar)+" "))
 }
 
 func (ins Instruction) String() string {

@@ -2,9 +2,6 @@ package op
 
 import "strings"
 
-// ParamType enum type.
-type ParamType int
-
 func (pt ParamType) Encoding() byte {
 	switch pt {
 	case TReg:

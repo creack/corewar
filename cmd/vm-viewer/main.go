@@ -1,15 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"runtime/debug"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,9 +16,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"go.creack.net/corewar/asm"
-	"go.creack.net/corewar/asm/parser"
-	"go.creack.net/corewar/disasm"
+	"go.creack.net/corewar/cli"
 	"go.creack.net/corewar/op"
 	"go.creack.net/corewar/vm"
 )
@@ -57,14 +54,21 @@ var bannedColors = []int{
 
 var curColor = 0
 
-func nextColor() int {
+var colors = []tcell.Color{
+	// tcell.ColorBlue,
+	// tcell.ColorLightGreen,
+	// tcell.ColorRed,
+	// tcell.ColorPurple,
+}
+
+func nextColor() tcell.Color {
 	curColor++
-	curColor %= 256
+	curColor %= len(colors)
 	for slices.Contains(bannedColors, curColor) {
 		curColor++
-		curColor %= 256
+		curColor %= len(colors)
 	}
-	return curColor
+	return colors[curColor]
 }
 
 func colorCodeModif(color int, mods ...int) string {
@@ -84,29 +88,28 @@ func colorCodef(color int) string {
 }
 
 func nextColorCode() string {
-	return colorCodef(nextColor())
+	return colorCodef(int(nextColor()))
 }
 
-func dump(vm []byte, players []*vm.Player) string {
+func dump(vm []byte, processes []*vm.Process) string {
 	out := &strings.Builder{}
 
 	const width = 64
 
 	i := 0
 	for i < len(vm) {
-
 		b := vm[i]
 		if i%width == 0 {
 			if i != 0 {
 				fmt.Fprintf(out, "\n")
 			}
-			fmt.Fprintf(out, "0x%04x", i)
+			// fmt.Fprintf(out, "0x%04x", i)
 		}
-		if i%(width/4) == 0 {
-			fmt.Fprintf(out, " ")
-		}
+		// if i%(width/4) == 0 {
+		// 	fmt.Fprintf(out, " ")
+		// }
 		selectedCode := ""
-		for _, p := range players {
+		for _, p := range processes {
 			if i == int(p.PC) {
 				selectedCode = "\033[7m"
 			}
@@ -118,8 +121,33 @@ func dump(vm []byte, players []*vm.Player) string {
 	for i%width != 0 {
 		i++
 	}
-	fmt.Fprintf(out, "\n0x%04x", i)
+	// fmt.Fprintf(out, "\n0x%04x", i)
 
+	return out.String()
+}
+
+func dumpChampion(data []byte) string {
+	out := &strings.Builder{}
+	const width = 16
+	zz := make([]byte, width)
+	for i := 0; i < len(data); {
+		b := data[i]
+		if i%width == 0 {
+			if i+width <= len(data) && bytes.Equal(data[i:i+width], zz) {
+				fmt.Fprintf(out, "\n*")
+				for ; i < len(data) && bytes.Equal(data[i:i+width], zz); i += width {
+				}
+				continue
+			}
+			fmt.Fprintf(out, "\n0x%04X:", i)
+		}
+		if i%(width/2) == 0 {
+			fmt.Fprintf(out, " ")
+		}
+		fmt.Fprintf(out, " %02x", b)
+		i++
+	}
+	fmt.Fprintf(out, "\n")
 	return out.String()
 }
 
@@ -132,24 +160,30 @@ func NewGame(ctx context.Context, cw *vm.Corewar) *Game {
 			SetText(text)
 	}
 
-	ramView := newTextView("RAM")
-	_ = ramView
+	//ramView := newTextView("RAM")
 	// tview.ANSIWriter(leftContent).Write([]byte(intput))
+	ramView := tview.NewTable().SetBorders(false)
+
+	logsView := newTextView("")
+	logsView.SetTitle("Logs").SetBorder(true)
+	logsView.ScrollToEnd()
 
 	processListView := tview.NewTable().SetBorders(false)
 	processListView.SetTitle("Processes").SetBorder(true)
 
-	settingsView := newTextView("Settings")
-	settingsView.SetTitle("Settings").SetBorder(true)
+	stateView := newTextView("Settings")
+	stateView.SetTitle("Settings").SetBorder(true)
 
-	playersListView := newTextView("Players")
+	playersListView := tview.NewList()
 	playersListView.SetBorder(true)
 	playersListView.SetTitle("Players")
+	playersListView.SetSelectedFocusOnly(true)
 
 	rightPane := tview.NewFlex().SetDirection(tview.FlexRow)
 	rightPane.
-		AddItem(settingsView, 0, 1, false).
+		AddItem(stateView, 0, 2, false).
 		AddItem(playersListView, 0, 2, false).
+		AddItem(logsView, 0, 3, false).
 		AddItem(processListView, 0, 4, false)
 
 	ramPane := tview.NewFlex()
@@ -162,15 +196,28 @@ func NewGame(ctx context.Context, cw *vm.Corewar) *Game {
 		AddItem(rightPane, 0, 1, false)
 	_ = flex
 
+	pages := tview.NewPages()
+	pages.AddPage("main", flex, true, true)
+
+	for _, p := range cw.Players {
+		playersListView.AddItem("", "", 0, func() {
+			pages.ShowPage(fmt.Sprintf("disasm-player-%d", p.Number))
+		})
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 
 	return &Game{
 		app: app,
 
-		root:            flex,
+		root: pages,
+
+		mainPage:        flex,
 		ramView:         ramView,
 		processListView: processListView,
-		settingsView:    settingsView,
+		stateView:       stateView,
+		playerListView:  playersListView,
+		logsView:        logsView,
 
 		cw:     cw,
 		ctx:    ctx,
@@ -180,125 +227,18 @@ func NewGame(ctx context.Context, cw *vm.Corewar) *Game {
 	}
 }
 
-func parseCLI() ([]*CLIPlayer, error) {
-	const MaxPlayers = 4
-	// Define a variable to hold the -n value temporarily
-	var number int
-
-	var players []*CLIPlayer
-
-	// Process arguments manually
-	args := os.Args[1:]
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-
-		if arg == "-n" && i+1 < len(args) {
-			num, err := strconv.Atoi(args[i+1])
-			if err != nil {
-				return nil, fmt.Errorf("invalid number for -n flag: %q", args[i+1])
-			}
-			number = num
-			i++ // Skip the value of -n
-			continue
-		}
-
-		// If it's not a flag, it's a player name
-		if arg[0] != '-' {
-			players = append(players, &CLIPlayer{PathName: arg, Number: number})
-			number = 0 // Reset for the next player
-		}
-	}
-	if len(players) == 0 {
-		return nil, fmt.Errorf("no players provided")
-	}
-
-	// Make sure we don't have a duplicate number.
-	inputNumbers := map[int]string{}
-	// Create a list with the available player numbers.
-	numbers := make([]int, MaxPlayers)
-	for i := range numbers { // Populate the list.
-		numbers[i] = i + 1
-	}
-	// Go over the parsed players, and remove from the available list the numbers we already have.
-	for _, p := range players {
-		if !strings.HasSuffix(p.PathName, ".s") && !strings.HasSuffix(p.PathName, ".cor") {
-			return nil, fmt.Errorf("invalid file extension for %q, must be .s or .cor", p.PathName)
-		}
-		if p.Number == 0 {
-			continue
-		}
-		if p.Number < 1 || p.Number > MaxPlayers {
-			return nil, fmt.Errorf("invalid player number: %d for %q, must be between 1 and %d", p.Number, p.PathName, MaxPlayers)
-		}
-		if n, ok := inputNumbers[p.Number]; ok {
-			return nil, fmt.Errorf("duplicate player number: %d, used for %q and %q", p.Number, p.PathName, n)
-		}
-		inputNumbers[p.Number] = p.PathName
-		numbers = slices.DeleteFunc(numbers, func(elem int) bool {
-			return elem == p.Number
-		})
-	}
-
-	// Allocate next available number to players that don't have one.
-	for _, n := range numbers {
-		for _, p := range players {
-			if p.Number == 0 {
-				p.Number = n
-				break
-			}
-		}
-	}
-
-	return players, nil
-}
-
-type CLIPlayer struct {
-	PathName  string
-	ShortName string
-	Number    int
-	Data      []byte
-	Prog      *parser.Program
-}
-
-func loadPlayers(players []*CLIPlayer) error {
-	for _, p := range players {
-		tmp := strings.Split(p.PathName, "/")
-		p.ShortName = tmp[len(tmp)-1]
-		p.ShortName = strings.TrimSuffix(p.ShortName, ".s")
-		p.ShortName = strings.TrimSuffix(p.ShortName, ".cor")
-
-		data, err := os.ReadFile(p.PathName)
-		if err != nil {
-			return fmt.Errorf("failed to read file %q: %w", p.PathName, err)
-		}
-		if strings.HasSuffix(p.PathName, ".s") {
-			buf, pr, err := asm.Compile(p.PathName, string(data), false)
-			if err != nil {
-				return fmt.Errorf("failed to compile %q: %w", p.PathName, err)
-			}
-			p.Prog = pr
-			data = buf
-			continue
-		}
-		p.Data = data
-
-		prog, err := disasm.Disam(p.ShortName, data, false)
-		if err != nil {
-			return fmt.Errorf("failed to disassemble %q: %w", p.PathName, err)
-		}
-		p.Prog = prog
-	}
-	return nil
-}
-
 type Game struct {
 	app *tview.Application
 
-	root *tview.Flex
+	root *tview.Pages
 
-	ramView         *tview.TextView
+	mainPage *tview.Flex
+
+	ramView         tview.Primitive
 	processListView *tview.Table
-	settingsView    tview.Primitive
+	stateView       tview.Primitive
+	playerListView  tview.Primitive
+	logsView        *tview.TextView
 
 	cw *vm.Corewar
 
@@ -321,28 +261,81 @@ func (g *Game) Stop() {
 
 func (g *Game) Init() {
 	f := func(event *tcell.EventKey) *tcell.EventKey {
+		curPage, _ := g.root.GetFrontPage()
 		switch event.Key() {
 		case tcell.KeyCtrlC, tcell.KeyEscape:
+			if curPage != "main" {
+				g.root.SwitchToPage("main")
+				return nil
+			}
 			g.Stop()
 			return nil
+		case tcell.KeyEnter:
+			if curPage != "main" {
+				g.root.SwitchToPage("main")
+				return nil
+			}
+			return event
 		}
 		switch event.Rune() {
 		case 'n':
 			g.nextStepMu.Lock()
 			g.nextStep = true
 			g.nextStepMu.Unlock()
-
+			return nil
 		case ' ':
-			g.pausedMu.Lock()
-			g.paused = !g.paused
-			g.pausedMu.Unlock()
+			if curPage == "main" {
+				g.pausedMu.Lock()
+				g.paused = !g.paused
+				g.pausedMu.Unlock()
+			} else {
+				g.root.SwitchToPage("main")
+			}
+			return nil
 		case 'q':
+			if curPage != "main" {
+				g.root.SwitchToPage("main")
+				return nil
+			}
 			g.Stop()
 			return nil
 		}
 		return event
 	}
 	g.root.SetInputCapture(f)
+	go func() {
+	loop:
+		select {
+		case msg := <-g.cw.Messages:
+			g.app.QueueUpdateDraw(func() {
+				if msg.Type == vm.MsgClear {
+					g.logsView.Clear()
+					return
+				}
+				if msg.Type == vm.MsgPause {
+					g.pausedMu.Lock()
+					g.paused = true
+					g.pausedMu.Unlock()
+					return
+				}
+				// NOTE: Seems like there is a bug with tview, we can't reset the color to default
+				// with [:] or [:::], so we use tcell default.
+				colorCode := "[" + tcell.ColorDefault.String() + ":::]"
+				if msg.Process != nil {
+					colorCode = "[" + colors[msg.Process.ID%len(colors)].String() + ":::]"
+				}
+				if msg.Process != nil {
+					fmt.Fprintf(g.logsView, "%s[%d] %s[:::]\n", colorCode, msg.Process.ID, strings.TrimSuffix(msg.Message, "\n"))
+				} else {
+					fmt.Fprintf(g.logsView, "%s%s[:::]\n", colorCode, strings.TrimSuffix(msg.Message, "\n"))
+				}
+			})
+			g.app.Draw()
+		case <-g.ctx.Done():
+			return
+		}
+		goto loop
+	}()
 }
 
 func (g *Game) Update() error {
@@ -363,27 +356,20 @@ func (g *Game) Update() error {
 	if !forceNextStep() && isPaused() {
 		return nil
 	}
-	g.cw.NextCycle()
 
 	if err := g.cw.Round(); err != nil {
 		return fmt.Errorf("failed to execute instruction: %w", err)
 	}
+	g.Draw()
 
 	return nil
 }
 
-func (g *Game) Draw() {
-	g.ramView.Clear()
-	w := tview.ANSIWriter(g.ramView)
-	io.Copy(w, strings.NewReader(dump(g.cw.Ram, g.cw.Players)))
-
-	sv := g.settingsView.(*tview.TextView)
-	sv.Clear()
-	g.nextStepMu.Lock()
-	sv.SetText(fmt.Sprintf("next: %t\n", g.nextStep))
-	g.nextStepMu.Unlock()
-
+func (g *Game) drawProcessList() {
+	g.processListView.SetTitle(fmt.Sprintf("Processes (%d)", len(g.cw.Processes)))
+	g.processListView.Clear()
 	for i, elem := range []string{
+		"pid",
 		"ppid",
 		"pc",
 		"op",
@@ -409,68 +395,177 @@ func (g *Game) Draw() {
 		}
 		return strings.Join(parts, "")
 	}
-	g.processListView.SetTitle(fmt.Sprintf("Processes (%d)", len(g.cw.Players)))
-	for i, elem := range g.cw.Players {
+	for i, elem := range g.cw.Processes {
 		curInsName := ""
 		if elem.CurInstruction != nil {
 			curInsName = elem.CurInstruction.OpCode.Name
 		}
 		for j, content := range []any{
-			elem.Number,
+			elem.ID,
+			elem.Player.Number,
 			fmt.Sprintf("%04x", elem.PC),
 			curInsName,
 			elem.WaitCycles,
 			dumpRegisters(elem.Registers[:]),
 			elem.Carry,
 		} {
-			g.processListView.SetCell(i+1, j, tview.NewTableCell(fmt.Sprint(content)).SetAlign(tview.AlignRight))
+			cell := tview.NewTableCell(fmt.Sprint(content)).SetAlign(tview.AlignRight)
+			cell.SetTextColor(colors[elem.ID%len(colors)])
+			g.processListView.SetCell(i+1, j, cell)
+
 		}
 	}
 }
 
-func main() {
-	players, err := parseCLI()
-	if err != nil {
-		log.Fatalf("failed to parse CLI: %s.", err)
+func (g *Game) drawPlayerList() {
+	pv := g.playerListView.(*tview.List)
+
+	for i, p := range g.cw.Players {
+		deadCode := ""
+		if p.Dead {
+			deadCode = "s"
+		}
+		pid := p.Number
+		attr := "[" + colors[pid%len(colors)].String() + "::" + deadCode + ":]"
+		txt := fmt.Sprintf("%s[%d] %s (%d)[:::]", attr, p.Number, p.Name, p.ProcessCount)
+		pv.SetItemText(i, txt, "")
 	}
-	if err := loadPlayers(players); err != nil {
-		log.Fatalf("Failed to load players: %s.", err)
+}
+
+func (g *Game) drawState() {
+	sv := g.stateView.(*tview.TextView)
+	sv.Clear()
+
+	fmt.Fprintf(sv, "Cycles: %d\n", g.cw.Cycle)
+	fmt.Fprintf(sv, "Current CyclesToDie: %d\n", g.cw.CurCyclesToDie)
+	fmt.Fprintf(sv, "Next CyclesToCheck: %d\n", g.cw.Config.CyclesToDie)
+	fmt.Fprintf(sv, "Memory Size: %d\n", g.cw.Config.MemSize)
+	fmt.Fprintf(sv, "IdxMod: %d\n", g.cw.Config.IdxMod)
+	fmt.Fprintf(sv, "NumLives: %d\n", g.cw.Config.NumLives)
+	fmt.Fprintf(sv, "CycleDelta: %d\n", g.cw.Config.CycleDelta)
+	fmt.Fprintf(sv, "Period live count: %d\n", g.cw.LiveCalls)
+}
+
+func (g *Game) drawRAM() {
+	const width = 64
+	ramView := g.ramView.(*tview.Table)
+	ramView.SetSelectable(true, true)
+	for i, elem := range g.cw.Ram {
+		onClick := []func(){func() { g.cw.Messages <- vm.NewMessage(vm.MsgPause, nil, "") }}
+
+		cell := tview.NewTableCell(fmt.Sprintf("%02x", elem.Value))
+		if elem.Process != nil {
+			cell.SetTextColor(colors[elem.Process.ID%len(colors)])
+			if elem.AccessType == 1 {
+				cell.SetAttributes(tcell.AttrBold)
+			} else if elem.AccessType == 2 {
+				cell.SetAttributes(tcell.AttrItalic | tcell.AttrDim)
+			} else if elem.AccessType == 3 {
+				cell.SetAttributes(tcell.AttrItalic | tcell.AttrDim | tcell.AttrUnderline | tcell.AttrBlink)
+			}
+			onClick = append(onClick, func() {
+				g.cw.Messages <- vm.NewMessage(vm.MsgDebug, elem.Process, fmt.Sprintf("Yup!!! %d", elem.Process.ID))
+			})
+		} else if elem.Value == 0 {
+			cell.SetTextColor(tcell.ColorDimGray)
+			cell.SetAttributes(tcell.AttrDim)
+		}
+		for _, p := range g.cw.Processes {
+			if !p.Player.Dead && i == int(p.PC) {
+				cell.SetAttributes(tcell.AttrReverse).SetTextColor(colors[p.ID%len(colors)])
+				onClick = append(onClick, func() {
+					g.cw.Messages <- vm.NewMessage(vm.MsgDebug, p, fmt.Sprintf("PC player %d", p.Player.Number))
+				})
+			}
+		}
+		cell.SetClickedFunc(func() bool {
+			go func() {
+				for _, f := range onClick {
+					f()
+				}
+			}()
+			return true
+		})
+		ramView.SetCell(i/width, i%width, cell)
 	}
 
-	playersData := make([][]byte, len(players))
-	for i, p := range players {
-		playersData[i] = p.Data
+	// ramView := g.ramView.(*tview.TextView)
+	// ramView.Clear()
+	// w := tview.ANSIWriter(ramView)
+	// io.Copy(w, strings.NewReader(dump(g.cw.Ram, g.cw.Processes)))
+}
+
+func (g *Game) Draw() {
+	g.drawRAM()
+	g.drawState()
+	g.drawPlayerList()
+	g.drawProcessList()
+}
+
+func main() {
+	for _, v := range tcell.ColorNames {
+		colors = append(colors, v)
 	}
-	cw := vm.NewCorewar(op.MemSize, playersData)
+
+	cfg, players, err := cli.ParseConfig()
+	if err != nil {
+		log.Fatalf("Failed to parse CLI config: %s.", err)
+	}
+
+	cw := vm.NewCorewar(cfg)
+	if err := cw.Round(); err != nil {
+		log.Fatalf("Failed to execute first round: %s.", err)
+	}
 
 	g := NewGame(context.Background(), cw)
 
+	for _, p := range players {
+		pl2 := tview.NewTextView().SetText(dumpChampion(p.Data))
+
+		pl := tview.NewTextView().SetText(fmt.Sprintf("Player: %d (%s)\n\n", p.Number, p.Prog.GetDirective(op.NameCmdString)))
+		buf := &strings.Builder{}
+		for _, elem := range p.Prog.Nodes {
+			fmt.Fprintf(buf, "%s\n", elem.PrettyPrint(p.Prog.Nodes))
+		}
+		pl.SetText(buf.String())
+
+		flex := tview.NewFlex().AddItem(pl, 0, 1, false).
+			AddItem(pl2, 0, 1, false)
+		g.root.AddPage(fmt.Sprintf("disasm-player-%d", p.Number), flex, true, false)
+	}
+
 	g.Init()
 	go func() {
-		ticker := time.NewTicker(1 * time.Millisecond)
+		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 	loop:
-		func() {
-			defer func() {
-				if e := recover(); e != nil {
-					g.app.Stop()
-					log.Printf("Recovered from panic: %v", e)
-					debug.PrintStack()
-				}
-			}()
-			if err := g.Update(); err != nil {
-				if errors.Is(err, Termination) {
-					g.Stop()
-					return
-				}
-				log.Printf("failed to update: %s", err)
+
+		defer func() {
+			if e := recover(); e != nil {
+				g.app.Stop()
+				log.Printf("Recovered from panic: %v", e)
+				debug.PrintStack()
 			}
 		}()
+		end := false
+		if err := g.Update(); err != nil {
+			if errors.Is(err, io.EOF) {
+				end = true
+			} else if errors.Is(err, Termination) {
+				g.Stop()
+				return
+			} else {
+				log.Printf("failed to update: %s", err)
+			}
+		}
 
 		g.app.QueueUpdateDraw(func() {
 			g.Draw()
 		})
 
+		if end {
+			return
+		}
 		select {
 		case <-ticker.C:
 		case <-g.ctx.Done():

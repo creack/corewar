@@ -1,15 +1,9 @@
 package op
 
-import (
-	"encoding/binary"
-)
-
-var Endian = binary.BigEndian
-
 const (
-	MemSize       = 4 * 1024 // Memory size in bytes.
-	IdxMod        = 512      // Index modulo, i.e. how far can a player go in the memory (except for long instructions).
-	MaxArgsNumber = 4        // This may not be changed. Arbitrary rule. // TODO: Add validation for this.
+	MemSize       = 4 * 1024    // Memory size in bytes.
+	IdxMod        = MemSize / 8 // Index modulo, i.e. how far can a player go in the memory (except for long instructions).
+	MaxArgsNumber = 4           // This may not be changed. Arbitrary rule. // TODO: Add validation for this.
 )
 
 // Lexer Tokens.
@@ -35,6 +29,9 @@ const (
 const (
 	RegisterCount = 16 // r1 <--> r16
 )
+
+// ParamType enum type.
+type ParamType byte
 
 // InstructionType values.
 const (
@@ -82,6 +79,6 @@ type Header struct {
 // VM settings.
 const (
 	CyclesToDie = 1536 // Number of cycles to be declared dead.
-	CycleDelta  = 5    // Number of cycles to be remove from CyclesToDie after NumLives.
-	NumLives    = 40   // Number of 'live' calls before updating CyclesToDie.
+	CycleDelta  = 50   // Number of cycles to be remove from CyclesToDie after NumLives.
+	NumLives    = 21   // Number of 'live' calls before updating CyclesToDie.
 )
