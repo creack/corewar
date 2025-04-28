@@ -20,6 +20,20 @@ github.com/ebitengine/purego/internal/cgo
 github.com/ebitengine/purego/internal/fakecgo
 github.com/ebitengine/purego/internal/strings
 github.com/ebitengine/purego/objc
+# github.com/ebitenui/ebitenui v0.6.2
+## explicit; go 1.23.0
+github.com/ebitenui/ebitenui
+github.com/ebitenui/ebitenui/event
+github.com/ebitenui/ebitenui/image
+github.com/ebitenui/ebitenui/input
+github.com/ebitenui/ebitenui/internal/event
+github.com/ebitenui/ebitenui/internal/input
+github.com/ebitenui/ebitenui/internal/jsUtil
+github.com/ebitenui/ebitenui/utilities/colorutil
+github.com/ebitenui/ebitenui/utilities/datastructures
+github.com/ebitenui/ebitenui/utilities/mobile
+github.com/ebitenui/ebitenui/utilities/sliceutil
+github.com/ebitenui/ebitenui/widget
 # github.com/gdamore/encoding v1.0.1
 ## explicit; go 1.9
 github.com/gdamore/encoding
@@ -84,6 +98,8 @@ github.com/hajimehoshi/bitmapfont/v3/internal/unicode
 # github.com/hajimehoshi/ebiten/v2 v2.8.8
 ## explicit; go 1.22.0
 github.com/hajimehoshi/ebiten/v2
+github.com/hajimehoshi/ebiten/v2/ebitenutil
+github.com/hajimehoshi/ebiten/v2/inpututil
 github.com/hajimehoshi/ebiten/v2/internal/affine
 github.com/hajimehoshi/ebiten/v2/internal/atlas
 github.com/hajimehoshi/ebiten/v2/internal/buffered
@@ -151,10 +167,14 @@ github.com/rivo/tview
 # github.com/rivo/uniseg v0.4.7
 ## explicit; go 1.18
 github.com/rivo/uniseg
+# golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0
+## explicit; go 1.23.0
+golang.org/x/exp/slices
 # golang.org/x/image v0.26.0
 ## explicit; go 1.23.0
 golang.org/x/image/ccitt
 golang.org/x/image/font
+golang.org/x/image/font/gofont/goregular
 golang.org/x/image/math/fixed
 golang.org/x/image/tiff
 golang.org/x/image/tiff/lzw

@@ -1,0 +1,21 @@
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - ineffassign
+    - decorder
+    - dupl
+    - errorlint
+    - exhaustive
+    - forcetypeassert
+    - goconst
+    - godot
+    - gofmt
+    - prealloc
+    - nilerr
+    - predeclared
+    - unconvert
+    - wrapcheck
+    - staticcheck
+    - dupl
+    - gocritic
