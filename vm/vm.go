@@ -3,6 +3,7 @@ package vm
 
 import (
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -65,7 +66,7 @@ type Corewar struct {
 
 	// Messages is a channel where the VM will send messages.
 	// Needs to be consumed otherwise it will block.
-	Messages chan Message
+	Messages chan Message `json:"-"`
 }
 
 // NextCycle advances the cycle counter until a player is ready to go
@@ -149,267 +150,265 @@ func mathOp(operation func(a, b int64) int64) func(cw *Corewar, p *Process) bool
 }
 
 var ops = func() map[int]func(cw *Corewar, p *Process) bool {
-	ops := map[int]func(cw *Corewar, p *Process) bool{
-		// noop.
-		0x00: func(cw *Corewar, p *Process) bool { return true },
+	ops := map[int]func(cw *Corewar, p *Process) bool{}
 
-		// live. Declare a player alive.
-		// 1 Param, always a direct value.
-		0x01: func(cw *Corewar, p *Process) bool {
-			ins := p.CurInstruction
+	// noop.
+	ops[0x00] = func(cw *Corewar, p *Process) bool { return true }
 
-			cw.LiveCalls++ // Global live count increases event if the target player is invalid/dead.
-			i := slices.IndexFunc(cw.Players, func(p *Player) bool { return p.Number == int(ins.Params[0].Value) })
-			if i == -1 || i >= len(cw.Players) || cw.Players[i].Dead {
-				cw.Messages <- NewMessage(MsgLiveMiss, p, fmt.Sprintf("Missed 'live' from %d (%s)", p.Player.Number, p.Player.Name))
-				return true
-			}
-			targetPlayer := cw.Players[i]
-			targetPlayer.TotalLives++
-			targetPlayer.CurrentLives++
-			cw.Messages <- NewMessage(MsgLive, p, fmt.Sprintf("Player %d (%s) is alive", targetPlayer.Number, targetPlayer.Name))
+	// live. Declare a player alive.
+	// 1 Param, always a direct value.
+	ops[0x01] = func(cw *Corewar, p *Process) bool {
+		ins := p.CurInstruction
+
+		cw.LiveCalls++ // Global live count increases event if the target player is invalid/dead.
+		i := slices.IndexFunc(cw.Players, func(p *Player) bool { return p.Number == int(ins.Params[0].Value) })
+		if i == -1 || i >= len(cw.Players) || cw.Players[i].Dead {
+			cw.Messages <- NewMessage(MsgLiveMiss, p, fmt.Sprintf("Missed 'live' from %d (%s)", p.Player.Number, p.Player.Name))
 			return true
-		},
-
-		// ld. Loads the value of the first param into the second.
-		// Updates the carry.
-		// 2 Params:
-		// - 1: Can be a direct value or an indirect value.
-		// - 2: Always a register, update the content.
-		0x02: func(cw *Corewar, p *Process) bool {
-			ins := p.CurInstruction
-
-			mod := int64(cw.Config.IdxMod)
-			// If the instruction is lld, we don't use the modulo.
-			if ins.OpCode.Code == 0x0d {
-				mod = 1
-			}
-
-			// Target register.
-			r := ins.Params[1].Value - 1
-
-			// If the first param is a Direct value, use it directly.
-			if ins.Params[0].Typ == op.TDir {
-				p.Registers[r] = uint32(ins.Params[0].Value)
-				cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("LD Direct 0x%04x into R%d", ins.Params[0].Value, r))
-			} else {
-				// If the first param is an indirect value, we need to
-				// read the value from the RAM.
-				// - `ld 34,r3` loads the REG_SIZE bytes starting at the address PC + 34 % IDX_MOD into r3.
-				p.Registers[r] = cw.Ram.GetRamValue32(p, uint32(int64(p.PC)+int64(ins.Params[0].Value)%mod))
-				cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("LD RAM %d (0x%04x) into R%d", uint32(int64(ins.Params[0].Value)%mod), p.Registers[r], r))
-			}
-
-			// Update the carry.
-			p.Carry = p.Registers[r] == 0
-
-			return true
-		},
-
-		// st. Store the 1st param into the 2nd.
-		// 2 Params:
-		// - 1: Always a register, take the content.
-		// - 2: Can be a target register or an indirect value.
-		0x03: func(cw *Corewar, p *Process) bool {
-			ins := p.CurInstruction
-
-			// Source: register content.
-			source := p.Registers[ins.Params[0].Value-1]
-
-			// If the target is a register, we replace its value.
-			// - `st r2,r8` copies the content of r3 into r8.
-			if ins.Params[1].Typ == op.TReg {
-				p.Registers[ins.Params[1].Value-1] = source
-				if ins.Params[0].Typ == op.TReg {
-					cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("ST R%d (0x%04x) into R%d", ins.Params[0].Value, source, ins.Params[1].Value-1))
-				} else {
-					cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("ST RAM %d (0x%04x) into R%d", ins.Params[0].Value, source, ins.Params[1].Value-1))
-				}
-				return true
-			}
-
-			// If the target is an indirect value, we store the content of the
-			// source register into the RAM.
-			// - `st r4,34` stores the content of r4 at the address PC + 34 % IDX_MOD.
-			cw.Ram.SetRamValue(p, uint32(int64(p.PC)+ins.Params[1].Value%int64(cw.Config.IdxMod)), source)
-			if ins.Params[0].Typ == op.TReg {
-				cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("ST R%d (0x%04x) into RAM %d", ins.Params[0].Value, source, ins.Params[1].Value%int64(cw.Config.IdxMod)))
-			} else {
-				cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("ST RAM %d (0x%04x) into RAM %d", ins.Params[0].Value, source, ins.Params[1].Value%int64(cw.Config.IdxMod)))
-			}
-			return true
-		},
-
-		// add. sub. Adds/Substacts the 1st and 2nd params and stores the result in the 3rd param.
-		// Updates the carry.
-		// 3 Params: All registers.
-		0x04: mathOp(opAdd),
-		0x05: mathOp(opSub),
-
-		// and. or. xor. Bitwise AND/OR/XOR of the 1st and 2nd params and stores the result in the 3rd param.
-		// Updates the carry.
-		// 3 Params:
-		// - 1: Can be a register, direct or indirect value.
-		// - 2: Can be a register, direct or indirect value.
-		// - 3: Always a register, update the content.
-		0x06: mathOp(opAnd),
-		0x07: mathOp(opOr),
-		0x08: mathOp(opXor),
-
-		// zjmp. Jump to the address PC + param % IDX_MOD if the carry
-		// is set to 1.
-		// 1 Param: Always a direct value as index (int16).
-		0x09: func(cw *Corewar, p *Process) bool {
-			if !p.Carry {
-				return true // Advance the PC.
-			}
-			ins := p.CurInstruction
-
-			// `zjmp %23` puts, if carry equals 1, PC + 23 % IDX_MOD into the PC.
-			newPC := int32(p.PC) + (int32(int16(ins.Params[0].Value)) % int32(cw.Config.IdxMod))
-			if newPC < 0 {
-				newPC += int32(len(cw.Ram))
-			}
-			newPC %= int32(len(cw.Ram))
-			p.PC = uint32(newPC)
-			return false // Manual overrode the PC, don't advance it.
-		},
-
-		// ldi. Load index. Adds the 1st and 2nd params and loads the result into the 3rd param.
-		// Updates the carry.
-		// 3 Params:
-		// - 1: Can be a register, direct or indirect value as index (int16).
-		// - 2: Can be a register or direct value as index (int16).
-		// - 3: Always a register, update the content.
-		0x0a: func(cw *Corewar, p *Process) bool {
-			ins := p.CurInstruction
-
-			mod := int32(cw.Config.IdxMod)
-			if ins.OpCode.Code == 0x0e { // lldi is the same as ldi but without modulo.
-				mod = 1
-			}
-
-			var source1, source2 int16
-
-			// Target register.
-			target := ins.Params[2].Value - 1
-
-			// Resolve the 1st and 2nd params.
-			if ins.Params[0].Typ == op.TReg {
-				// If register, takes the value.
-				source1 = int16(p.Registers[ins.Params[0].Value-1])
-			} else if ins.Params[0].Typ == op.TDir {
-				// If direct, use it directly.
-				source1 = int16(ins.Params[0].Value)
-			} else {
-				// If indirect, read int16 (2) bytes from RAM at PC + <val> % IDX_MOD.
-				cw.Messages <- NewMessage(MsgPause, nil, "")
-				source1 = int16(cw.Ram.GetRamValue16(p, uint32(int32(p.PC)+(int32(int16(ins.Params[0].Value))%mod))))
-			}
-			if ins.Params[1].Typ == op.TReg {
-				source2 = int16(p.Registers[ins.Params[1].Value-1])
-			} else {
-				source2 = int16(ins.Params[1].Value)
-			}
-
-			// ldi 3,%4,r1 reads IND_SIZ bytes from the address PC + 3 % IDX_MOD, adds 4 to this value.
-			// The sum is named S.
-			// REG_SIZE bytes are read from the address PC + S % IDX_MOD and copied into r1.
-			S := source1 + source2
-			p.Registers[target] = cw.Ram.GetRamValue32(p, uint32(int32(p.PC)+int32(S)%mod))
-
-			return true
-		},
-
-		// sti. Store index. Store register value at the address of 1st param + 2nd params.
-		// 3 Params:
-		// - 1: Always a register, take the content.
-		// - 2: Can be a register, direct or indirect value as index (int16).
-		// - 3: Can be a register or direct value as index (int16).
-		0x0b: func(cw *Corewar, p *Process) bool {
-			ins := p.CurInstruction
-
-			var target1, target2 int16
-
-			// Source register.
-			source := p.Registers[ins.Params[0].Value-1]
-
-			// Resolve the 1st and 2nd params.
-			if ins.Params[1].Typ == op.TReg {
-				// If register, takes the value.
-				target1 = int16(p.Registers[ins.Params[1].Value-1])
-			} else if ins.Params[1].Typ == op.TDir {
-				// If direct, use it directly.
-				target1 = int16(ins.Params[1].Value)
-			} else {
-				// If indirect, read int16 (2) bytes from RAM at PC + <val> % IDX_MOD.
-				target1 = int16(cw.Ram.GetRamValue16(p, uint32(int32(p.PC)+(int32(int16(ins.Params[1].Value))%int32(cw.Config.IdxMod)))))
-			}
-			if ins.Params[2].Typ == op.TReg {
-				target2 = int16(p.Registers[ins.Params[2].Value-1])
-			} else {
-				target2 = int16(ins.Params[2].Value)
-			}
-
-			cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("STI R%d %s", ins.Params[0].Value, ins))
-			// `sti r2,%4,%5` copies the content of r2 into the address PC + (4+5) % IDX_MOD.
-			S := target1 + target2
-			cw.Ram.SetRamValue(p, uint32(int32(p.PC)+int32(S)%int32(cw.Config.IdxMod)), source)
-
-			return true
-		},
-
-		// fork.
-		// Fork the current process at the address PC + param % IDX_MOD.
-		// 1 Param: Always a direct value as index (int16).
-		0x0c: func(cw *Corewar, p *Process) bool {
-			ins := p.CurInstruction
-
-			mod := int64(cw.Config.IdxMod)
-			if ins.OpCode.Code == 0x0f { // lfork is the same s fork but without modulo.
-				mod = 1
-			}
-			newProcess := *p
-			newProcess.CurInstruction = nil
-			newProcess.PC = uint32((int64(p.PC) + (int64(int16(ins.Params[0].Value)) % mod)) % int64(len(cw.Ram)))
-			newProcess.ID = cw.NextPID
-			cw.NextPID++
-			cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("Forking process %d to %d", p.ID, newProcess.ID))
-			cw.Processes = append(cw.Processes, &newProcess)
-			p.Player.ProcessCount++
-			return true
-		},
-
-		// lld. Long load. Same as ld but without the IDX_MOD.
-		// Updates the carry.
-		// 2 Params:
-		// - 1: Can be a direct value or an indirect value.
-		// - 2: Always a register, update the content.
-		0x0d: nil, // Set later.
-
-		// lldi. Long load index. Same as ldi but without the IDX_MOD.
-		// Updates the carry.
-		0x0e: nil, // Set later.
-
-		// lfork. Long fork. Same as fork but without the IDX_MOD.
-		0x0f: nil, // Set later.
-
-		// aff. Display the value of the 1st param.
-		// 1 Param: Always a register.
-		0x10: func(cw *Corewar, p *Process) bool {
-			ins := p.CurInstruction
-
-			// Target register.
-			r := ins.Params[0].Value - 1
-
-			cw.Messages <- NewMessage(MsgDisplay, p, fmt.Sprintf("%c", p.Registers[r]%256))
-
-			return true
-		},
+		}
+		targetPlayer := cw.Players[i]
+		targetPlayer.TotalLives++
+		targetPlayer.CurrentLives++
+		cw.Messages <- NewMessage(MsgLive, p, fmt.Sprintf("Player %d (%s) is alive", targetPlayer.Number, targetPlayer.Name))
+		return true
 	}
+
+	// ld. Loads the value of the first param into the second.
+	// Updates the carry.
+	// 2 Params:
+	// - 1: Can be a direct value or an indirect value.
+	// - 2: Always a register, update the content.
+	ops[0x02] = func(cw *Corewar, p *Process) bool {
+		ins := p.CurInstruction
+
+		mod := int64(cw.Config.IdxMod)
+		// If the instruction is lld, we don't use the modulo.
+		if ins.OpCode.Code == 0x0d {
+			mod = 1
+		}
+
+		// Target register.
+		r := ins.Params[1].Value - 1
+
+		// If the first param is a Direct value, use it directly.
+		if ins.Params[0].Typ == op.TDir {
+			p.Registers[r] = uint32(ins.Params[0].Value)
+			cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("LD Direct 0x%04x into R%d", ins.Params[0].Value, r))
+		} else {
+			// If the first param is an indirect value, we need to
+			// read the value from the RAM.
+			// - `ld 34,r3` loads the REG_SIZE bytes starting at the address PC + 34 % IDX_MOD into r3.
+			p.Registers[r] = cw.Ram.GetRamValue32(p, uint32(int64(p.PC)+int64(ins.Params[0].Value)%mod))
+			cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("LD RAM %d (0x%04x) into R%d", uint32(int64(ins.Params[0].Value)%mod), p.Registers[r], r))
+		}
+
+		// Update the carry.
+		p.Carry = p.Registers[r] == 0
+
+		return true
+	}
+
+	// st. Store the 1st param into the 2nd.
+	// 2 Params:
+	// - 1: Always a register, take the content.
+	// - 2: Can be a target register or an indirect value.
+	ops[0x03] = func(cw *Corewar, p *Process) bool {
+		ins := p.CurInstruction
+
+		// Source: register content.
+		source := p.Registers[ins.Params[0].Value-1]
+
+		// If the target is a register, we replace its value.
+		// - `st r2,r8` copies the content of r3 into r8.
+		if ins.Params[1].Typ == op.TReg {
+			p.Registers[ins.Params[1].Value-1] = source
+			if ins.Params[0].Typ == op.TReg {
+				cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("ST R%d (0x%04x) into R%d", ins.Params[0].Value, source, ins.Params[1].Value-1))
+			} else {
+				cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("ST RAM %d (0x%04x) into R%d", ins.Params[0].Value, source, ins.Params[1].Value-1))
+			}
+			return true
+		}
+
+		// If the target is an indirect value, we store the content of the
+		// source register into the RAM.
+		// - `st r4,34` stores the content of r4 at the address PC + 34 % IDX_MOD.
+		cw.Ram.SetRamValue(p, uint32(int64(p.PC)+ins.Params[1].Value%int64(cw.Config.IdxMod)), source)
+		if ins.Params[0].Typ == op.TReg {
+			cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("ST R%d (0x%04x) into RAM %d", ins.Params[0].Value, source, ins.Params[1].Value%int64(cw.Config.IdxMod)))
+		} else {
+			cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("ST RAM %d (0x%04x) into RAM %d", ins.Params[0].Value, source, ins.Params[1].Value%int64(cw.Config.IdxMod)))
+		}
+		return true
+	}
+
+	// add. sub. Adds/Substacts the 1st and 2nd params and stores the result in the 3rd param.
+	// Updates the carry.
+	// 3 Params: All registers.
+	ops[0x04] = mathOp(opAdd)
+	ops[0x05] = mathOp(opSub)
+
+	// and. or. xor. Bitwise AND/OR/XOR of the 1st and 2nd params and stores the result in the 3rd param.
+	// Updates the carry.
+	// 3 Params:
+	// - 1: Can be a register, direct or indirect value.
+	// - 2: Can be a register, direct or indirect value.
+	// - 3: Always a register, update the content.
+	ops[0x06] = mathOp(opAnd)
+	ops[0x07] = mathOp(opOr)
+	ops[0x08] = mathOp(opXor)
+
+	// zjmp. Jump to the address PC + param % IDX_MOD if the carry
+	// is set to 1.
+	// 1 Param: Always a direct value as index (int16).
+	ops[0x09] = func(cw *Corewar, p *Process) bool {
+		if !p.Carry {
+			return true // Advance the PC.
+		}
+		ins := p.CurInstruction
+
+		// `zjmp %23` puts, if carry equals 1, PC + 23 % IDX_MOD into the PC.
+		newPC := int32(p.PC) + (int32(int16(ins.Params[0].Value)) % int32(cw.Config.IdxMod))
+		if newPC < 0 {
+			newPC += int32(len(cw.Ram))
+		}
+		newPC %= int32(len(cw.Ram))
+		p.PC = uint32(newPC)
+		return false // Manual overrode the PC, don't advance it.
+	}
+
+	// ldi. Load index. Adds the 1st and 2nd params and loads the result into the 3rd param.
+	// Updates the carry.
+	// 3 Params:
+	// - 1: Can be a register, direct or indirect value as index (int16).
+	// - 2: Can be a register or direct value as index (int16).
+	// - 3: Always a register, update the content.
+	ops[0x0a] = func(cw *Corewar, p *Process) bool {
+		ins := p.CurInstruction
+
+		mod := int32(cw.Config.IdxMod)
+		if ins.OpCode.Code == 0x0e { // lldi is the same as ldi but without modulo.
+			mod = 1
+		}
+
+		var source1, source2 int16
+
+		// Target register.
+		target := ins.Params[2].Value - 1
+
+		// Resolve the 1st and 2nd params.
+		if ins.Params[0].Typ == op.TReg {
+			// If register, takes the value.
+			source1 = int16(p.Registers[ins.Params[0].Value-1])
+		} else if ins.Params[0].Typ == op.TDir {
+			// If direct, use it directly.
+			source1 = int16(ins.Params[0].Value)
+		} else {
+			// If indirect, read int16 (2) bytes from RAM at PC + <val> % IDX_MOD.
+			cw.Messages <- NewMessage(MsgPause, nil, "")
+			source1 = int16(cw.Ram.GetRamValue16(p, uint32(int32(p.PC)+(int32(int16(ins.Params[0].Value))%mod))))
+		}
+		if ins.Params[1].Typ == op.TReg {
+			source2 = int16(p.Registers[ins.Params[1].Value-1])
+		} else {
+			source2 = int16(ins.Params[1].Value)
+		}
+
+		// ldi 3,%4,r1 reads IND_SIZ bytes from the address PC + 3 % IDX_MOD, adds 4 to this value.
+		// The sum is named S.
+		// REG_SIZE bytes are read from the address PC + S % IDX_MOD and copied into r1.
+		S := source1 + source2
+		p.Registers[target] = cw.Ram.GetRamValue32(p, uint32(int32(p.PC)+int32(S)%mod))
+
+		return true
+	}
+
+	// sti. Store index. Store register value at the address of 1st param + 2nd params.
+	// 3 Params:
+	// - 1: Always a register, take the content.
+	// - 2: Can be a register, direct or indirect value as index (int16).
+	// - 3: Can be a register or direct value as index (int16).
+	ops[0x0b] = func(cw *Corewar, p *Process) bool {
+		ins := p.CurInstruction
+
+		var target1, target2 int16
+
+		// Source register.
+		source := p.Registers[ins.Params[0].Value-1]
+
+		// Resolve the 1st and 2nd params.
+		if ins.Params[1].Typ == op.TReg {
+			// If register, takes the value.
+			target1 = int16(p.Registers[ins.Params[1].Value-1])
+		} else if ins.Params[1].Typ == op.TDir {
+			// If direct, use it directly.
+			target1 = int16(ins.Params[1].Value)
+		} else {
+			// If indirect, read int16 (2) bytes from RAM at PC + <val> % IDX_MOD.
+			target1 = int16(cw.Ram.GetRamValue16(p, uint32(int32(p.PC)+(int32(int16(ins.Params[1].Value))%int32(cw.Config.IdxMod)))))
+		}
+		if ins.Params[2].Typ == op.TReg {
+			target2 = int16(p.Registers[ins.Params[2].Value-1])
+		} else {
+			target2 = int16(ins.Params[2].Value)
+		}
+
+		cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("STI R%d %s", ins.Params[0].Value, ins))
+		// `sti r2,%4,%5` copies the content of r2 into the address PC + (4+5) % IDX_MOD.
+		S := target1 + target2
+		cw.Ram.SetRamValue(p, uint32(int32(p.PC)+int32(S)%int32(cw.Config.IdxMod)), source)
+
+		return true
+	}
+
+	// fork.
+	// Fork the current process at the address PC + param % IDX_MOD.
+	// 1 Param: Always a direct value as index (int16).
+	ops[0x0c] = func(cw *Corewar, p *Process) bool {
+		ins := p.CurInstruction
+
+		mod := int64(cw.Config.IdxMod)
+		if ins.OpCode.Code == 0x0f { // lfork is the same s fork but without modulo.
+			mod = 1
+		}
+		newProcess := *p
+		newProcess.CurInstruction = nil
+		newProcess.PC = uint32((int64(p.PC) + (int64(int16(ins.Params[0].Value)) % mod)) % int64(len(cw.Ram)))
+		newProcess.ID = cw.NextPID
+		cw.NextPID++
+		cw.Messages <- NewMessage(MsgDebug, p, fmt.Sprintf("Forking process %d to %d", p.ID, newProcess.ID))
+		cw.Processes = append(cw.Processes, &newProcess)
+		p.Player.ProcessCount++
+		return true
+	}
+
+	// lld. Long load. Same as ld but without the IDX_MOD.
+	// Updates the carry.
+	// 2 Params:
+	// - 1: Can be a direct value or an indirect value.
+	// - 2: Always a register, update the content.
 	ops[0x0d] = ops[0x02]
+
+	// lldi. Long load index. Same as ldi but without the IDX_MOD.
+	// Updates the carry.
 	ops[0x0e] = ops[0x0a]
+
+	// lfork. Long fork. Same as fork but without the IDX_MOD.
 	ops[0x0f] = ops[0x0c]
+
+	// aff. Display the value of the 1st param.
+	// 1 Param: Always a register.
+	ops[0x10] = func(cw *Corewar, p *Process) bool {
+		ins := p.CurInstruction
+
+		// Target register.
+		r := ins.Params[0].Value - 1
+
+		cw.Messages <- NewMessage(MsgDisplay, p, fmt.Sprintf("%c", p.Registers[r]%256))
+
+		return true
+	}
+
 	return ops
 }()
 
@@ -539,6 +538,9 @@ func (cw *Corewar) Round() error {
 	}
 	cw.NextCycle()
 
+	buf, _ := json.Marshal(cw.Ram)
+	cw.Messages <- NewMessage(MsgDump, nil, string(buf))
+
 	return nil
 }
 
@@ -575,12 +577,12 @@ func NewCorewar(cfg Config) *Corewar {
 		for i, elem := range pCfg.Data[headerlen:] {
 			ram[process.PC+uint32(i)%uint32(len(ram))] = RamEntry{
 				Value:   elem,
-				Process: &Process{ID: player.Number, Player: player},
+				Process: process,
 			}
 		}
 	}
 
-	return &Corewar{
+	cw := &Corewar{
 		Config: cfg,
 
 		Ram:       ram,
@@ -593,4 +595,10 @@ func NewCorewar(cfg Config) *Corewar {
 
 		Messages: make(chan Message, 10), // Arbitrary size.
 	}
+
+	buf, _ := json.Marshal(cw.Ram)
+
+	cw.Messages <- NewMessage(MsgDump, nil, string(buf))
+
+	return cw
 }

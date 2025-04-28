@@ -318,6 +318,9 @@ func (g *Game) Init() {
 					g.pausedMu.Unlock()
 					return
 				}
+				if msg.Type == vm.MsgDump {
+					return
+				}
 				// NOTE: Seems like there is a bug with tview, we can't reset the color to default
 				// with [:] or [:::], so we use tcell default.
 				colorCode := "[" + tcell.ColorDefault.String() + ":::]"

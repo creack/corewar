@@ -1,15 +1,26 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"image/color"
+	"io"
 	"log"
-	"strings"
+	"slices"
+	"sync"
+	"time"
 
+	"github.com/gdamore/tcell/v2"
 	"github.com/hajimehoshi/bitmapfont/v3"
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
 
 	"go.creack.net/corewar/cli"
+	"go.creack.net/corewar/op"
 	"go.creack.net/corewar/vm"
 )
 
@@ -366,16 +377,155 @@ var fontFace = text.NewGoXFace(bitmapfont.Face)
 // 	g.drawProcessList()
 // }
 
-const initialScreenWidth, initialScreenHeight = 1024, 768
+type RamEntry struct {
+	vm.RamEntry
+	//image         *ebiten.Image // TODO: text.
+	color         *color.RGBA
+	idx           int
+	x, y          int
+	width, height int
+	hovered       bool
+
+	pcBG, regBG *ebiten.Image
+}
+
+func (re RamEntry) In(x, y int) bool {
+	return re.x <= x && x < re.x+re.width && re.y <= y && y < re.y+re.height
+}
+
+func (re RamEntry) Draw(screen *ebiten.Image) {
+	col := re.color
+
+	// Background.
+
+	if true {
+		var img *ebiten.Image
+		if re.RamEntry.Process != nil && int(re.RamEntry.Process.PC) == re.idx {
+			img = re.pcBG
+			col = &color.RGBA{A: 0xFF}
+		} else {
+			img = re.regBG
+		}
+		opts := &ebiten.DrawImageOptions{}
+		opts.GeoM.Translate(float64(re.x), float64(re.y))
+		screen.DrawImage(img, opts)
+	}
+
+	textOp := &text.DrawOptions{}
+	textOp.LineSpacing = 0 //fontFace.Metrics().HLineGap + fontFace.Metrics().HAscent + fontFace.Metrics().HDescent
+
+	if re.hovered {
+		col = &color.RGBA{R: 0xFF, A: 0xFF}
+	} else if re.Process == nil && re.Value == 0 {
+		col = &color.RGBA{R: 0x69, G: 0x69, B: 0x69, A: 0xFF}
+	}
+
+	if re.color != nil {
+		textOp.ColorScale.ScaleWithColor(col)
+	}
+
+	textOp.GeoM.Translate(float64(re.x), float64(re.y))
+	text.Draw(screen, fmt.Sprintf("%02x", re.Value), fontFace, textOp)
+}
+
+const initialScreenWidth, initialScreenHeight = 1920, 1080
 
 // Game implements ebiten.Game interface.
 type Game struct {
-	fontFace *text.Face
+	cw *vm.Corewar
+
+	fontFace    *text.Face
+	color       color.Color
+	cursorShape ebiten.CursorShapeType
+	shapeIdx    int
+
+	ramMu sync.RWMutex
+	ram   []*RamEntry
+
+	lastCycle time.Time
+	ended     bool
+}
+
+func NewGame() *Game {
+	// Measure the width and height of a character, we use a monospace font, so all characters have the same width and height.
+	charWidth, charHeight := text.Measure(" ", fontFace, 0) //fontFace.Metrics().HLineGap+fontFace.Metrics().HAscent+fontFace.Metrics().HDescent)
+	charHeight *= 1
+
+	g := &Game{}
+
+	pcBG := ebiten.NewImage(2*int(charWidth), int(charHeight))
+	pcBG.Fill(color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF})
+	regBG := ebiten.NewImage(2*int(charWidth), int(charHeight))
+	regBG.Fill(color.RGBA{A: 0xFF})
+
+	ram := make([]byte, op.MemSize)
+
+	ramEntries := make([]*RamEntry, 0, len(ram))
+	ram[len(ram)-1] = 0xFF
+	const width = 64
+	for i, elem := range ram {
+		ramEntries = append(ramEntries, &RamEntry{
+			RamEntry: vm.RamEntry{
+				Value: elem,
+			},
+			color:  &color.RGBA{R: 0xFF, A: 0xFF},
+			idx:    i,
+			x:      (i % width) * int(3*charWidth),
+			y:      (i / width) * int(charHeight),
+			width:  int(2 * charWidth),
+			height: int(charHeight),
+
+			pcBG:  pcBG,
+			regBG: regBG,
+		})
+	}
+
+	g.ram = ramEntries
+
+	return g
 }
 
 // Update proceeds the game state.
 // Update is called every tick (1/60 [s] by default).
 func (g *Game) Update() error {
+	if !g.ended && time.Since(g.lastCycle) > 1*time.Millisecond {
+		if err := g.cw.Round(); err != nil {
+			if errors.Is(err, io.EOF) {
+				g.ended = true
+				log.Printf("End.")
+				return nil
+			}
+			return fmt.Errorf("round: %w", err)
+		}
+		g.lastCycle = time.Now()
+	}
+
+	shapes := []ebiten.CursorShapeType{
+		ebiten.CursorShapeDefault,
+		ebiten.CursorShapeText,
+		ebiten.CursorShapeCrosshair,
+		ebiten.CursorShapePointer,
+		ebiten.CursorShapeEWResize,
+		ebiten.CursorShapeNSResize,
+		ebiten.CursorShapeNESWResize,
+		ebiten.CursorShapeNWSEResize,
+		ebiten.CursorShapeMove,
+		ebiten.CursorShapeNotAllowed,
+	}
+	_ = shapes
+	if inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+		g.shapeIdx++
+		g.shapeIdx %= len(shapes)
+		ebiten.SetCursorShape(shapes[g.shapeIdx])
+	}
+
+	x, y := ebiten.CursorPosition()
+	g.ramMu.RLock()
+	for _, re := range g.ram {
+		re.hovered = re.In(x, y)
+	}
+	g.ramMu.RUnlock()
+
 	// Write your game's logical update.
 	return nil
 }
@@ -383,14 +533,27 @@ func (g *Game) Update() error {
 // Draw draws the game screen.
 // Draw is called every frame (typically 1/60[s] for 60Hz display).
 func (g *Game) Draw(screen *ebiten.Image) {
-	keyStrs := []string{"a", "b", "c"}
-	keyNames := []string{"A", "B", "C"}
-	// Write your game's rendering.
-	textOp := &text.DrawOptions{}
-	textOp.LineSpacing = fontFace.Metrics().HLineGap + fontFace.Metrics().HAscent + fontFace.Metrics().HDescent
-	textOp.ColorScale.ScaleWithColor(color.RGBA{R: 255})
+	//img := image.NewRGBA(image.Rect(0, 0, 30, 30))
+	// imge := ebiten.NewImage(30, 30)
+	// imge.Fill(color.RGBA{R: 0x00, G: 0xFF, B: 0x00, A: 0xFF})
+	// screen.DrawImage(imge, nil)
+	// return
+	g.ramMu.RLock()
+	for _, re := range g.ram {
+		re.Draw(screen)
+	}
+	g.ramMu.RUnlock()
 
-	text.Draw(screen, strings.Join(keyStrs, ", ")+"\n"+strings.Join(keyNames, ", "), fontFace, textOp)
+	//log.Fatal()
+	textOp := &text.DrawOptions{}
+	textOp.LineSpacing = 0 //fontFace.Metrics().HLineGap + fontFace.Metrics().HAscent + fontFace.Metrics().HDescent
+
+	textOp.GeoM.Translate(float64(1200), float64(0))
+	text.Draw(screen, "hello", fontFace, textOp)
+
+	return
+	x, y := ebiten.CursorPosition()
+	ebitenutil.DebugPrint(screen, fmt.Sprintf("Hello! %d/%d\n", x, y))
 }
 
 // Layout takes the outside size (e.g., the window size) and returns the (logical) screen size.
@@ -399,12 +562,39 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeigh
 	return initialScreenWidth, initialScreenHeight
 }
 
+var curColor = 0
+
+var colors = []tcell.Color{
+	// tcell.ColorBlue,
+	// tcell.ColorLightGreen,
+	// tcell.ColorRed,
+	// tcell.ColorPurple,
+}
+
+var bannedColors = []int{}
+
+func nextColor() tcell.Color {
+	curColor++
+	curColor %= len(colors)
+	for slices.Contains(bannedColors, curColor) {
+		curColor++
+		curColor %= len(colors)
+	}
+	return colors[curColor]
+}
+
 func main() {
-	game := &Game{}
+	for _, v := range tcell.ColorNames {
+		colors = append(colors, v)
+	}
+
+	game := NewGame()
 	// Specify the window size as you like. Here, a doubled size is specified.
 	ebiten.SetWindowSize(initialScreenWidth, initialScreenHeight)
 	ebiten.SetWindowTitle("Corewar")
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
+	ebiten.SetScreenClearedEveryFrame(false)
+	ebiten.SetVsyncEnabled(true)
 
 	cfg, _, err := cli.ParseConfig()
 	if err != nil {
@@ -412,9 +602,43 @@ func main() {
 	}
 
 	cw := vm.NewCorewar(cfg)
-	if err := cw.Round(); err != nil {
-		log.Fatalf("Failed to execute first round: %s.", err)
-	}
+	game.cw = cw
+	game.lastCycle = time.Now()
+
+	ctx := context.Background()
+	go func() {
+	loop:
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-cw.Messages:
+			switch msg.Type {
+			case vm.MsgDump:
+				var ram vm.Ram
+				if err := json.Unmarshal([]byte(msg.Message), &ram); err != nil {
+					log.Fatalf("Failed to unmarshal ram dump: %s.", err)
+				}
+
+				game.ramMu.Lock()
+				for i, elem := range ram {
+					game.ram[i].RamEntry = elem
+					if elem.Process != nil {
+						r, g, b := colors[elem.Process.ID%len(colors)].RGB()
+						game.ram[i].color = &color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 0xFF}
+					}
+				}
+				game.ramMu.Unlock()
+
+			default:
+				log.Printf("[%s] Message: %s", msg.Type, msg.Message)
+			}
+		}
+		goto loop
+	}()
+
+	// if err := cw.Round(); err != nil {
+	// 	log.Fatalf("Failed to execute first round: %s.", err)
+	// }
 
 	// Call ebiten.RunGame to start your game loop.
 	if err := ebiten.RunGameWithOptions(game, &ebiten.RunGameOptions{

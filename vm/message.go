@@ -14,6 +14,7 @@ const (
 	MsgGameOver
 	MsgClear
 	MsgPause
+	MsgDump
 )
 
 func (mt MessageType) String() string {
@@ -38,6 +39,8 @@ func (mt MessageType) String() string {
 		return "Clear"
 	case MsgPause:
 		return "Pause"
+	case MsgDump:
+		return "Dump"
 	default:
 		return "Unknown"
 	}
